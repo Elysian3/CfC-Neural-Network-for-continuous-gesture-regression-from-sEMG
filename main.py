@@ -7,3 +7,5 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from ncps.wirings import AutoNCP
 from ncps.torch import LTC, CfC
+
+
