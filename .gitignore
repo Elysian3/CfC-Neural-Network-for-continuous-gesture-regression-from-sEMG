@@ -1,0 +1,49 @@
+# ── Datasets (exceed GitHub 100 MB file-size limit) ──────────────────────────
+src/data/DB2/
+src/data/LowerLimbTestData/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── PyTorch / training artefacts ─────────────────────────────────────────────
+log/
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS / editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── OMC / Claude internals ────────────────────────────────────────────────────
+.omc/
+.claude/
+
+
+*.mat
