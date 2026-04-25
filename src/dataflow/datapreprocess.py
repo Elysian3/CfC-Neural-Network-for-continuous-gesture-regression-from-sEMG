@@ -79,7 +79,6 @@ def preprocess_emg(emg_raw: np.ndarray, fs: float = FS) -> np.ndarray:
         Preprocessed EMG, same shape as input.
     """
     # ── Step 1: DC removal ───────────────────────────────────────────────────
-    # Electrodes often pick up a slow DC offset (electrode-skin contact potential).
     # Subtracting the per-channel mean centres each signal around zero, which is
     # required before any frequency-domain filtering.
     emg = emg_raw - np.mean(emg_raw, axis=0)
@@ -111,6 +110,7 @@ def preprocess_emg(emg_raw: np.ndarray, fs: float = FS) -> np.ndarray:
     emg = scipy.signal.sosfiltfilt(sos_bp, emg, axis=0)
 
     return emg
+
 
 
 if __name__ == '__main__':

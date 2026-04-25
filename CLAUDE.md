@@ -65,13 +65,8 @@ Preprocessing for DB2 EMG (`src/models/datapreprocess.py`):
 
 `src/hardwareOperation/load-model.cpp` — C++ stub for loading the trained model on an edge device (currently a placeholder).
 
-### Test Scripts
-
-- `test/TestOfLnn.py` — Main integration test for the LNN pipeline on lower-limb data; contains the full `SequenceLearner` class (currently data loading is implemented, training loop commented out).
-- `test/test1onimage.py` / `test/review.py` — Baseline experiments with a standard MLP on FashionMNIST (used for framework validation, not the core sEMG task).
 
 ## Key Conventions
 
 - All paths in scripts are constructed relative to each file's `__file__` location using `os.path` — do not hardcode absolute paths.
 - Training logs are written to `log/` at the project root (PyTorch Lightning `CSVLogger("log")`).
-- The `src/models/train.py` file has a syntax error (`def main()` missing colon — fix before running).

@@ -1,6 +1,7 @@
 # ── Datasets (exceed GitHub 100 MB file-size limit) ──────────────────────────
-src/data/DB2/
-src/data/LowerLimbTestData/
+src/data/
+.omc/
+.omx/
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
@@ -47,3 +48,7 @@ Thumbs.db
 
 
 *.mat
+TODO.md
+AGENTS.md
+CLAUDE.md
+
