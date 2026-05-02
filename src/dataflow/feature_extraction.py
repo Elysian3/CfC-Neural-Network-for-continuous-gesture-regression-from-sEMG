@@ -23,14 +23,17 @@ from typing import Iterable
 import numpy as np
 
 try:
+    from doa_mapping import DOA5_NAMES, apply_linear_doa_mapping
     from datapreprocess import FS, load_data, preprocess_emg
     from SwRectify import STRIDE_MS, WIN_MS, sliding_window
 except ImportError:  # pragma: no cover - package-style fallback
+    from .doa_mapping import DOA5_NAMES, apply_linear_doa_mapping
     from .datapreprocess import FS, load_data, preprocess_emg
     from .SwRectify import STRIDE_MS, WIN_MS, sliding_window
 
 
 FEATURE_ORDER = ("mav", "mavs", "wl", "zc", "ssc")
+DEFAULT_MU_LAW_MU = 255.0
 
 
 def _validate_windows(windows: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -282,11 +285,30 @@ def _select_targets(
     return selected_targets, selected_columns, target_names
 
 
+def _select_mapped_targets(
+    data: dict,
+    *,
+    target_mapping: str,
+    target_mapping_source: str,
+) -> tuple[np.ndarray, list[int], list[str]]:
+    """Build semantic target channels from a mapped raw target family."""
+    if target_mapping_source not in data:
+        raise KeyError(f"target mapping source '{target_mapping_source}' not present in loaded data")
+
+    source_targets = np.asarray(data[target_mapping_source], dtype=np.float32)
+    if source_targets.ndim != 2:
+        raise ValueError(f"{target_mapping_source} must be 2-D for target mapping")
+    mapped_targets = apply_linear_doa_mapping(source_targets, mapping=target_mapping)
+    return mapped_targets, list(range(source_targets.shape[1])), list(DOA5_NAMES)
+
+
 def run_feature_pipeline(
     file_path: str,
     *,
     target_source: str = "glove",
     target_columns: int | Iterable[int] | None = None,
+    target_mapping: str | None = None,
+    target_mapping_source: str = "glove",
     fs: float = FS,
     window_ms: int = WIN_MS,
     stride_ms: int = STRIDE_MS,
@@ -303,11 +325,20 @@ def run_feature_pipeline(
     together so inspection and training code can share the same artifact.
     """
     data = load_data(file_path)
-    selected_targets, selected_columns, target_names = _select_targets(
-        data,
-        target_source=target_source,
-        target_columns=target_columns,
-    )
+    if target_mapping is None:
+        selected_targets, selected_columns, target_names = _select_targets(
+            data,
+            target_source=target_source,
+            target_columns=target_columns,
+        )
+        resolved_target_source = target_source
+    else:
+        selected_targets, selected_columns, target_names = _select_mapped_targets(
+            data,
+            target_mapping=target_mapping,
+            target_mapping_source=target_mapping_source,
+        )
+        resolved_target_source = target_mapping
 
     filtered_emg = preprocess_emg(data["emg"], fs=fs)
     windows = sliding_window(
@@ -319,7 +350,7 @@ def run_feature_pipeline(
         target_mode=target_mode,
         target_offset_samples=target_offset_samples,
         target_names=target_names,
-        target_prefix=target_source,
+        target_prefix=resolved_target_source,
     )
     feature_set = extract_emg_features(
         windows,
@@ -334,35 +365,67 @@ def run_feature_pipeline(
         "selected_targets": selected_targets,
         "windows": windows,
         "feature_set": feature_set,
-        "target_source": target_source,
+        "target_source": resolved_target_source,
         "target_columns": selected_columns,
+        "target_mapping": target_mapping,
+        "target_mapping_source": target_mapping_source if target_mapping is not None else None,
         "target_names": target_names,
         "file_path": file_path,
     }
 
 
-def fit_feature_normalizer(feature_matrix: np.ndarray) -> dict:
+def fit_feature_normalizer(
+    feature_matrix: np.ndarray,
+    *,
+    method: str = "zscore",
+    mu: float = DEFAULT_MU_LAW_MU,
+) -> dict:
     """
-    Fit simple z-score statistics for a feature matrix.
+    Fit normalization statistics for a feature matrix.
 
     Training code should fit these statistics on the training split only.
     Keeping this as an explicit function makes that requirement obvious.
     """
     feature_array = np.asarray(feature_matrix, dtype=np.float32)
-    mean = feature_array.mean(axis=0, dtype=np.float64).astype(np.float32)
-    std = feature_array.std(axis=0, dtype=np.float64).astype(np.float32)
-    return {
-        "mean": mean,
-        "std": np.maximum(std, 1e-6).astype(np.float32),
-    }
+    if method == "zscore":
+        mean = feature_array.mean(axis=0, dtype=np.float64).astype(np.float32)
+        std = feature_array.std(axis=0, dtype=np.float64).astype(np.float32)
+        return {
+            "method": "zscore",
+            "mean": mean,
+            "std": np.maximum(std, 1e-6).astype(np.float32),
+        }
+    if method == "mu_law":
+        center = feature_array.mean(axis=0, dtype=np.float64).astype(np.float32)
+        centered = feature_array - center
+        scale = np.max(np.abs(centered), axis=0).astype(np.float32)
+        if mu <= 0.0:
+            raise ValueError("mu must be positive for mu-law normalization")
+        return {
+            "method": "mu_law",
+            "center": center,
+            "scale": np.maximum(scale, 1e-6).astype(np.float32),
+            "mu": float(mu),
+        }
+    raise ValueError(f"unsupported feature normalization method: {method}")
 
 
 def apply_feature_normalizer(feature_matrix: np.ndarray, stats: dict) -> np.ndarray:
-    """Apply precomputed z-score statistics to a feature matrix."""
+    """Apply precomputed feature normalization statistics."""
     feature_array = np.asarray(feature_matrix, dtype=np.float32)
-    mean = np.asarray(stats["mean"], dtype=np.float32)
-    std = np.asarray(stats["std"], dtype=np.float32)
-    return ((feature_array - mean) / std).astype(np.float32)
+    method = stats.get("method", "zscore")
+    if method == "zscore":
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        std = np.asarray(stats["std"], dtype=np.float32)
+        return ((feature_array - mean) / std).astype(np.float32)
+    if method == "mu_law":
+        center = np.asarray(stats["center"], dtype=np.float32)
+        scale = np.asarray(stats["scale"], dtype=np.float32)
+        mu = float(stats["mu"])
+        scaled = (feature_array - center) / scale
+        compressed = np.sign(scaled) * (np.log1p(mu * np.abs(scaled)) / np.log1p(mu))
+        return compressed.astype(np.float32)
+    raise ValueError(f"unsupported feature normalization method: {method}")
 
 
 def prepare_regression_data(
@@ -390,20 +453,28 @@ def prepare_regression_data(
         x = apply_feature_normalizer(feature_matrix, stats)
     else:
         stats = {
+            "method": "zscore",
             "mean": np.zeros(feature_matrix.shape[1], dtype=np.float32),
             "std": np.ones(feature_matrix.shape[1], dtype=np.float32),
         }
         x = feature_matrix
+
+    if stats.get("method", "zscore") == "zscore":
+        normalization_mean = np.asarray(stats["mean"], dtype=np.float32)
+        normalization_std = np.asarray(stats["std"], dtype=np.float32)
+    else:
+        normalization_mean = np.asarray(stats["center"], dtype=np.float32)
+        normalization_std = np.asarray(stats["scale"], dtype=np.float32)
 
     return {
         "x": x,
         "y": target_matrix,
         "feature_names": feature_set["channel_feature_names"],
         "target_names": feature_set.get("target_names"),
-        "normalization_mean": np.asarray(stats["mean"], dtype=np.float32),
-        "normalization_std": np.asarray(stats["std"], dtype=np.float32),
+        "normalization_method": stats.get("method", "zscore"),
+        "normalization_mean": normalization_mean,
+        "normalization_std": normalization_std,
         "window_start_indices": np.asarray(feature_set["window_start_indices"], dtype=np.int32),
         "window_end_indices": np.asarray(feature_set["window_end_indices"], dtype=np.int32),
         "window_center_indices": np.asarray(feature_set["window_center_indices"], dtype=np.int32),
     }
-

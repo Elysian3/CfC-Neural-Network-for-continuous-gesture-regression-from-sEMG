@@ -1,5 +1,6 @@
 # ── Datasets (exceed GitHub 100 MB file-size limit) ──────────────────────────
 src/data/
+reference files/*
 .omc/
 .omx/
 

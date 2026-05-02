@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 
 from train import (
+    DEFAULT_TARGET_COLUMN,
     build_best_cfc_config,
     build_sequence_split,
     evaluate_split,
@@ -68,6 +69,42 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="E2",
         help="Exercise from the adaptation subject used for final testing.",
+    )
+    parser.add_argument(
+        "--target-column",
+        type=int,
+        default=DEFAULT_TARGET_COLUMN,
+        help="Zero-based glove column used as the continuous regression target.",
+    )
+    parser.add_argument(
+        "--target-offset-samples",
+        type=int,
+        default=None,
+        help="Target alignment shift in samples. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--zc-threshold",
+        type=float,
+        default=None,
+        help="Explicit zero-crossing threshold. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--ssc-threshold",
+        type=float,
+        default=None,
+        help="Explicit slope-sign-change threshold. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--feature-normalization",
+        choices=("zscore", "mu_law"),
+        default=None,
+        help="Feature normalization method. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--target-normalization",
+        choices=("zscore", "mu_law"),
+        default=None,
+        help="Target normalization method. Defaults to the core training config value.",
     )
     parser.add_argument(
         "--adapt-learning-rate",
@@ -313,19 +350,36 @@ def run_subject_adaptation(args: argparse.Namespace) -> dict[str, Any]:
         query_exercise=args.query_exercise,
     )
 
-    pretrain_config = build_best_cfc_config(
-        db2_dir=base_config.db2_dir,
-        split_strategy="recording",
-        train_files=protocol["train_files"],
-        val_files=protocol["val_files"],
-        test_files=protocol["query_files"],
-        device=args.device,
-    )
+    overrides = {
+        "db2_dir": base_config.db2_dir,
+        "split_strategy": "recording",
+        "train_files": protocol["train_files"],
+        "val_files": protocol["val_files"],
+        "test_files": protocol["query_files"],
+        "target_columns": (args.target_column,),
+        "device": args.device,
+    }
+    if args.target_offset_samples is not None:
+        overrides["target_offset_samples"] = args.target_offset_samples
+    if args.zc_threshold is not None:
+        overrides["zc_threshold"] = args.zc_threshold
+    if args.ssc_threshold is not None:
+        overrides["ssc_threshold"] = args.ssc_threshold
+    if args.feature_normalization is not None:
+        overrides["feature_normalization"] = args.feature_normalization
+    if args.target_normalization is not None:
+        overrides["target_normalization"] = args.target_normalization
+
+    pretrain_config = build_best_cfc_config(**overrides)
 
     print("Subject adaptation protocol")
     print(f"  train subjects : {list(protocol['train_subjects'])}")
     print(f"  val subject    : {protocol['val_subject']}")
     print(f"  adapt subject  : {protocol['adapt_subject']}")
+    print(f"  target column  : {args.target_column}")
+    print(f"  target offset  : {pretrain_config.target_offset_samples} samples")
+    print(f"  normalization  : x={pretrain_config.feature_normalization}, y={pretrain_config.target_normalization}")
+    print(f"  ZC/SSC thresh  : {pretrain_config.zc_threshold} / {pretrain_config.ssc_threshold}")
     print(f"  support files  : {list(protocol['support_files'])}")
     print(f"  query files    : {list(protocol['query_files'])}")
 

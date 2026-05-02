@@ -25,6 +25,7 @@ if str(DATAFLOW_DIR) not in sys.path:
     sys.path.insert(0, str(DATAFLOW_DIR))
 
 from feature_extraction import (
+    DEFAULT_MU_LAW_MU,
     STRIDE_MS,
     WIN_MS,
     apply_feature_normalizer,
@@ -34,6 +35,8 @@ from feature_extraction import (
 
 
 DEFAULT_TARGET_COLUMN = 10
+DEFAULT_TARGET_OFFSET_SAMPLES = 200
+DEFAULT_ZC_SSC_THRESHOLD = 1e-8
 
 
 @dataclass(frozen=True)
@@ -56,10 +59,19 @@ class CfCTrainingConfig:
     source_files: tuple[str, ...] = ()
     target_source: str = "glove"
     target_columns: tuple[int, ...] = (DEFAULT_TARGET_COLUMN,)
+    target_mapping: str | None = None
+    target_mapping_source: str = "glove"
+    target_mapping_version: str | None = None
     window_ms: int = WIN_MS
     stride_ms: int = STRIDE_MS
     target_mode: str = "last"
-    target_offset_samples: int = 0
+    target_offset_samples: int = DEFAULT_TARGET_OFFSET_SAMPLES
+    zc_threshold: float | None = DEFAULT_ZC_SSC_THRESHOLD
+    ssc_threshold: float | None = DEFAULT_ZC_SSC_THRESHOLD
+    zc_ssc_threshold_scale: float = 0.01
+    feature_normalization: str = "mu_law"
+    target_normalization: str = "mu_law"
+    mu_law_mu: float = DEFAULT_MU_LAW_MU
     blocked_train_fraction: float = 0.7
     blocked_val_fraction: float = 0.15
     blocked_test_fraction: float = 0.15
@@ -94,10 +106,19 @@ def build_best_cfc_config(**overrides) -> CfCTrainingConfig:
         "split_strategy": "blocked_time",
         "target_source": "glove",
         "target_columns": (DEFAULT_TARGET_COLUMN,),
+        "target_mapping": None,
+        "target_mapping_source": "glove",
+        "target_mapping_version": None,
         "window_ms": WIN_MS,
         "stride_ms": STRIDE_MS,
         "target_mode": "last",
-        "target_offset_samples": 0,
+        "target_offset_samples": DEFAULT_TARGET_OFFSET_SAMPLES,
+        "zc_threshold": DEFAULT_ZC_SSC_THRESHOLD,
+        "ssc_threshold": DEFAULT_ZC_SSC_THRESHOLD,
+        "zc_ssc_threshold_scale": 0.01,
+        "feature_normalization": "mu_law",
+        "target_normalization": "mu_law",
+        "mu_law_mu": DEFAULT_MU_LAW_MU,
         "blocked_train_fraction": 0.7,
         "blocked_val_fraction": 0.15,
         "blocked_test_fraction": 0.15,
@@ -132,6 +153,8 @@ class RecordingFeatures:
     feature_names: list[str]
     target_names: list[str]
     fs: float
+    action_labels: np.ndarray | None = None
+    repetition_labels: np.ndarray | None = None
 
 
 @dataclass
@@ -150,6 +173,8 @@ class SequenceSplit:
     recording_ids: np.ndarray
     feature_names: list[str]
     target_names: list[str]
+    action_labels: np.ndarray | None = None
+    repetition_labels: np.ndarray | None = None
 
 
 class SequenceRegressionDataset(data.Dataset):
@@ -164,6 +189,29 @@ class SequenceRegressionDataset(data.Dataset):
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.x[index], self.y[index]
+
+
+class WeightedSmoothL1Loss(nn.Module):
+    """SmoothL1 loss with fixed per-target weights."""
+
+    def __init__(self, target_weights: list[float] | tuple[float, ...] | np.ndarray) -> None:
+        super().__init__()
+        weights = torch.as_tensor(target_weights, dtype=torch.float32)
+        if weights.ndim != 1:
+            raise ValueError("target_weights must be a 1-D sequence")
+        if torch.any(weights <= 0):
+            raise ValueError("target_weights must be positive")
+        self.register_buffer("target_weights", weights)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if pred.shape != target.shape:
+            raise ValueError("prediction and target shapes must match")
+        if pred.shape[-1] != self.target_weights.numel():
+            raise ValueError(
+                f"expected {self.target_weights.numel()} targets, got {pred.shape[-1]}"
+            )
+        per_target = nn.functional.smooth_l1_loss(pred, target, reduction="none")
+        return (per_target * self.target_weights).mean()
 
 
 class CfCRegressor(nn.Module):
@@ -320,22 +368,34 @@ def load_recording_features(file_path: Path, config: CfCTrainingConfig) -> Recor
         str(file_path),
         target_source=config.target_source,
         target_columns=list(config.target_columns),
+        target_mapping=config.target_mapping,
+        target_mapping_source=config.target_mapping_source,
         window_ms=config.window_ms,
         stride_ms=config.stride_ms,
         target_mode=config.target_mode,
         target_offset_samples=config.target_offset_samples,
+        zc_threshold=config.zc_threshold,
+        ssc_threshold=config.ssc_threshold,
+        threshold_scale=config.zc_ssc_threshold_scale,
     )
     feature_set = pipeline["feature_set"]
+    data = pipeline["data"]
 
     x_windows = np.asarray(feature_set["feature_matrix"], dtype=np.float32)
     y_windows = np.asarray(feature_set["target_values"], dtype=np.float32)
     alignment_indices = np.asarray(feature_set["target_alignment_indices"], dtype=np.int32)
+    action_source = "restimulus" if "restimulus" in data else "stimulus"
+    repetition_source = "rerepetition" if "rerepetition" in data else "repetition"
+    action_labels = np.asarray(data[action_source]).reshape(-1)[alignment_indices].astype(np.int16)
+    repetition_labels = np.asarray(data[repetition_source]).reshape(-1)[alignment_indices].astype(np.int16)
 
     if config.max_windows_per_file is not None:
         max_windows = min(config.max_windows_per_file, x_windows.shape[0])
         x_windows = x_windows[:max_windows]
         y_windows = y_windows[:max_windows]
         alignment_indices = alignment_indices[:max_windows]
+        action_labels = action_labels[:max_windows]
+        repetition_labels = repetition_labels[:max_windows]
 
     return RecordingFeatures(
         recording_id=file_path.name,
@@ -345,6 +405,8 @@ def load_recording_features(file_path: Path, config: CfCTrainingConfig) -> Recor
         feature_names=list(feature_set["channel_feature_names"]),
         target_names=list(feature_set["target_names"] or []),
         fs=float(feature_set["fs"]),
+        action_labels=action_labels,
+        repetition_labels=repetition_labels,
     )
 
 
@@ -371,6 +433,8 @@ def build_sequence_split(
     time_values: list[float] = []
     alignment_values: list[int] = []
     recording_ids: list[str] = []
+    action_labels: list[int] = []
+    repetition_labels: list[int] = []
 
     feature_names: list[str] | None = None
     target_names: list[str] | None = None
@@ -403,6 +467,10 @@ def build_sequence_split(
             alignment_values.append(int(recording.target_alignment_indices[last_index]))
             time_values.append(float(recording.target_alignment_indices[last_index] / recording.fs))
             recording_ids.append(recording.recording_id)
+            if recording.action_labels is not None:
+                action_labels.append(int(recording.action_labels[last_index]))
+            if recording.repetition_labels is not None:
+                repetition_labels.append(int(recording.repetition_labels[last_index]))
 
     if not x_sequences:
         raise ValueError("no sequences were created; lower seq_len or check the input recordings")
@@ -415,6 +483,8 @@ def build_sequence_split(
         recording_ids=np.asarray(recording_ids),
         feature_names=feature_names or [],
         target_names=target_names or [],
+        action_labels=np.asarray(action_labels, dtype=np.int16) if action_labels else None,
+        repetition_labels=np.asarray(repetition_labels, dtype=np.int16) if repetition_labels else None,
     )
 
 
@@ -430,6 +500,8 @@ def _append_sequences_from_window_range(
     time_values: list[float],
     alignment_values: list[int],
     recording_ids: list[str],
+    action_labels: list[int],
+    repetition_labels: list[int],
 ) -> None:
     """
     Create many-to-one sequences from a contiguous window interval.
@@ -449,6 +521,135 @@ def _append_sequences_from_window_range(
         alignment_values.append(int(recording.target_alignment_indices[last_index]))
         time_values.append(float(recording.target_alignment_indices[last_index] / recording.fs))
         recording_ids.append(recording.recording_id)
+        if recording.action_labels is not None:
+            action_labels.append(int(recording.action_labels[last_index]))
+        if recording.repetition_labels is not None:
+            repetition_labels.append(int(recording.repetition_labels[last_index]))
+
+
+def _append_sequences_to_split(
+    recording: RecordingFeatures,
+    *,
+    split_name: str,
+    segment_start: int,
+    segment_end: int,
+    seq_len: int,
+    seq_stride: int,
+    split_buffers: dict[str, dict[str, list]],
+) -> None:
+    _append_sequences_from_window_range(
+        recording,
+        start_window=segment_start,
+        end_window=segment_end,
+        seq_len=seq_len,
+        seq_stride=seq_stride,
+        x_sequences=split_buffers[split_name]["x"],
+        y_sequences=split_buffers[split_name]["y"],
+        time_values=split_buffers[split_name]["time"],
+        alignment_values=split_buffers[split_name]["alignment"],
+        recording_ids=split_buffers[split_name]["recording"],
+        action_labels=split_buffers[split_name]["action"],
+        repetition_labels=split_buffers[split_name]["repetition"],
+    )
+
+
+def _validate_blocked_split_args(
+    train_fraction: float,
+    val_fraction: float,
+    test_fraction: float,
+    gap_windows: int,
+) -> None:
+    if train_fraction <= 0.0 or val_fraction <= 0.0 or test_fraction <= 0.0:
+        raise ValueError("blocked split fractions must all be positive")
+    if not np.isclose(train_fraction + val_fraction + test_fraction, 1.0, atol=1e-6):
+        raise ValueError("blocked split fractions must sum to 1.0")
+    if gap_windows < 0:
+        raise ValueError("gap_windows must be non-negative")
+
+
+def _empty_sequence_buffers() -> dict[str, dict[str, list]]:
+    return {
+        "train": {"x": [], "y": [], "time": [], "alignment": [], "recording": [], "action": [], "repetition": []},
+        "val": {"x": [], "y": [], "time": [], "alignment": [], "recording": [], "action": [], "repetition": []},
+        "test": {"x": [], "y": [], "time": [], "alignment": [], "recording": [], "action": [], "repetition": []},
+    }
+
+
+def _append_blocked_ranges(
+    recording: RecordingFeatures,
+    *,
+    segment_start: int,
+    segment_end: int,
+    train_fraction: float,
+    val_fraction: float,
+    test_fraction: float,
+    gap_windows: int,
+    seq_len: int,
+    seq_stride: int,
+    split_buffers: dict[str, dict[str, list]],
+) -> None:
+    n_windows = segment_end - segment_start
+    if n_windows < (3 * seq_len) + (2 * gap_windows):
+        return
+
+    train_end = segment_start + int(np.floor(n_windows * train_fraction))
+    val_end = segment_start + int(np.floor(n_windows * (train_fraction + val_fraction)))
+
+    train_range = (segment_start, max(train_end - gap_windows, segment_start))
+    val_range = (
+        min(train_end + gap_windows, segment_end),
+        max(min(val_end - gap_windows, segment_end), min(train_end + gap_windows, segment_end)),
+    )
+    test_range = (min(val_end + gap_windows, segment_end), segment_end)
+
+    for split_name, (start_window, end_window) in {
+        "train": train_range,
+        "val": val_range,
+        "test": test_range,
+    }.items():
+        _append_sequences_from_window_range(
+            recording,
+            start_window=start_window,
+            end_window=end_window,
+            seq_len=seq_len,
+            seq_stride=seq_stride,
+            x_sequences=split_buffers[split_name]["x"],
+            y_sequences=split_buffers[split_name]["y"],
+            time_values=split_buffers[split_name]["time"],
+            alignment_values=split_buffers[split_name]["alignment"],
+            recording_ids=split_buffers[split_name]["recording"],
+            action_labels=split_buffers[split_name]["action"],
+            repetition_labels=split_buffers[split_name]["repetition"],
+        )
+
+
+def _finalize_sequence_splits(
+    split_buffers: dict[str, dict[str, list]],
+    *,
+    feature_names: list[str],
+    target_names: list[str],
+    split_kind: str,
+) -> dict[str, SequenceSplit]:
+    sequence_splits: dict[str, SequenceSplit] = {}
+    for split_name, buffers in split_buffers.items():
+        if not buffers["x"]:
+            raise ValueError(
+                f"{split_kind} split '{split_name}' is empty; reduce gap_windows or seq_len, "
+                "or provide longer recordings"
+            )
+        sequence_splits[split_name] = SequenceSplit(
+            x=np.stack(buffers["x"]).astype(np.float32),
+            y=np.stack(buffers["y"]).astype(np.float32),
+            time_s=np.asarray(buffers["time"], dtype=np.float32),
+            alignment_indices=np.asarray(buffers["alignment"], dtype=np.int32),
+            recording_ids=np.asarray(buffers["recording"]),
+            feature_names=feature_names,
+            target_names=target_names,
+            action_labels=np.asarray(buffers["action"], dtype=np.int16) if buffers["action"] else None,
+            repetition_labels=np.asarray(buffers["repetition"], dtype=np.int16) if buffers["repetition"] else None,
+        )
+
+    return sequence_splits
 
 
 def build_blocked_sequence_splits(
@@ -470,21 +671,12 @@ def build_blocked_sequence_splits(
     - it avoids the worst leakage from adjacent overlapping windows
     """
 
-    if train_fraction <= 0.0 or val_fraction <= 0.0 or test_fraction <= 0.0:
-        raise ValueError("blocked split fractions must all be positive")
-    if not np.isclose(train_fraction + val_fraction + test_fraction, 1.0, atol=1e-6):
-        raise ValueError("blocked split fractions must sum to 1.0")
-    if gap_windows < 0:
-        raise ValueError("gap_windows must be non-negative")
+    _validate_blocked_split_args(train_fraction, val_fraction, test_fraction, gap_windows)
 
     feature_names: list[str] | None = None
     target_names: list[str] | None = None
 
-    split_buffers = {
-        "train": {"x": [], "y": [], "time": [], "alignment": [], "recording": []},
-        "val": {"x": [], "y": [], "time": [], "alignment": [], "recording": []},
-        "test": {"x": [], "y": [], "time": [], "alignment": [], "recording": []},
-    }
+    split_buffers = _empty_sequence_buffers()
 
     for recording in recordings:
         if feature_names is None:
@@ -497,80 +689,206 @@ def build_blocked_sequence_splits(
         elif target_names != recording.target_names:
             raise ValueError("target names differ between recordings")
 
-        n_windows = recording.x_windows.shape[0]
-        train_end = int(np.floor(n_windows * train_fraction))
-        val_end = int(np.floor(n_windows * (train_fraction + val_fraction)))
-
-        train_range = (0, max(train_end - gap_windows, 0))
-        val_range = (
-            min(train_end + gap_windows, n_windows),
-            max(min(val_end - gap_windows, n_windows), min(train_end + gap_windows, n_windows)),
-        )
-        test_range = (min(val_end + gap_windows, n_windows), n_windows)
-
-        for split_name, (start_window, end_window) in {
-            "train": train_range,
-            "val": val_range,
-            "test": test_range,
-        }.items():
-            _append_sequences_from_window_range(
-                recording,
-                start_window=start_window,
-                end_window=end_window,
-                seq_len=seq_len,
-                seq_stride=seq_stride,
-                x_sequences=split_buffers[split_name]["x"],
-                y_sequences=split_buffers[split_name]["y"],
-                time_values=split_buffers[split_name]["time"],
-                alignment_values=split_buffers[split_name]["alignment"],
-                recording_ids=split_buffers[split_name]["recording"],
-            )
-
-    sequence_splits: dict[str, SequenceSplit] = {}
-    for split_name, buffers in split_buffers.items():
-        if not buffers["x"]:
-            raise ValueError(
-                f"blocked split '{split_name}' is empty; reduce gap_windows or seq_len, "
-                "or provide longer recordings"
-            )
-        sequence_splits[split_name] = SequenceSplit(
-            x=np.stack(buffers["x"]).astype(np.float32),
-            y=np.stack(buffers["y"]).astype(np.float32),
-            time_s=np.asarray(buffers["time"], dtype=np.float32),
-            alignment_indices=np.asarray(buffers["alignment"], dtype=np.int32),
-            recording_ids=np.asarray(buffers["recording"]),
-            feature_names=feature_names or [],
-            target_names=target_names or [],
+        _append_blocked_ranges(
+            recording,
+            segment_start=0,
+            segment_end=recording.x_windows.shape[0],
+            train_fraction=train_fraction,
+            val_fraction=val_fraction,
+            test_fraction=test_fraction,
+            gap_windows=gap_windows,
+            seq_len=seq_len,
+            seq_stride=seq_stride,
+            split_buffers=split_buffers,
         )
 
-    return sequence_splits
+    return _finalize_sequence_splits(
+        split_buffers,
+        feature_names=feature_names or [],
+        target_names=target_names or [],
+        split_kind="blocked",
+    )
 
 
-def fit_target_normalizer(target_matrix: np.ndarray) -> dict:
-    """Fit z-score statistics for regression targets using the training split only."""
+def _contiguous_label_ranges(action_labels: np.ndarray, repetition_labels: np.ndarray) -> list[tuple[int, int]]:
+    if action_labels.shape != repetition_labels.shape:
+        raise ValueError("action and repetition labels must have the same shape")
+    if action_labels.ndim != 1:
+        raise ValueError("action and repetition labels must be 1-D")
+    if action_labels.size == 0:
+        return []
+
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for index in range(1, action_labels.size):
+        if action_labels[index] != action_labels[index - 1] or repetition_labels[index] != repetition_labels[index - 1]:
+            ranges.append((start, index))
+            start = index
+    ranges.append((start, action_labels.size))
+    return ranges
+
+
+def build_action_stratified_sequence_splits(
+    recordings: list[RecordingFeatures],
+    *,
+    seq_len: int,
+    seq_stride: int,
+    train_fraction: float,
+    val_fraction: float,
+    test_fraction: float,
+    gap_windows: int,
+) -> dict[str, SequenceSplit]:
+    """
+    Split each action across held-out repetition segments.
+
+    This is the MVP evaluation split for semantic DoA decoding: each action
+    contributes to all three final target-subject partitions. When at least
+    three repetitions are available, whole repetitions are assigned to splits.
+    If a dataset only provides one or two usable repetitions for an action, the
+    code falls back to blocked ranges within each repetition with guard gaps.
+    Sequences never cross a repetition boundary.
+    """
+
+    _validate_blocked_split_args(train_fraction, val_fraction, test_fraction, gap_windows)
+
+    feature_names: list[str] | None = None
+    target_names: list[str] | None = None
+    split_buffers = _empty_sequence_buffers()
+
+    for recording in recordings:
+        if recording.action_labels is None or recording.repetition_labels is None:
+            raise ValueError("action_stratified split requires action and repetition labels")
+
+        if feature_names is None:
+            feature_names = recording.feature_names
+        elif feature_names != recording.feature_names:
+            raise ValueError("feature names differ between recordings")
+
+        if target_names is None:
+            target_names = recording.target_names
+        elif target_names != recording.target_names:
+            raise ValueError("target names differ between recordings")
+
+        ranges_by_action: dict[int, list[tuple[int, int]]] = {}
+        for segment_start, segment_end in _contiguous_label_ranges(recording.action_labels, recording.repetition_labels):
+            if segment_end - segment_start < seq_len:
+                continue
+            action = int(recording.action_labels[segment_start])
+            ranges_by_action.setdefault(action, []).append((segment_start, segment_end))
+
+        for action, ranges in ranges_by_action.items():
+            if len(ranges) < 3:
+                for segment_start, segment_end in ranges:
+                    _append_blocked_ranges(
+                        recording,
+                        segment_start=segment_start,
+                        segment_end=segment_end,
+                        train_fraction=train_fraction,
+                        val_fraction=val_fraction,
+                        test_fraction=test_fraction,
+                        gap_windows=gap_windows,
+                        seq_len=seq_len,
+                        seq_stride=seq_stride,
+                        split_buffers=split_buffers,
+                    )
+                continue
+
+            n_segments = len(ranges)
+            train_count = max(1, int(np.floor(n_segments * train_fraction)))
+            val_count = max(1, int(np.floor(n_segments * val_fraction)))
+            if train_count + val_count >= n_segments:
+                train_count = max(1, n_segments - 2)
+                val_count = 1
+
+            split_names = (
+                ["train"] * train_count
+                + ["val"] * val_count
+                + ["test"] * (n_segments - train_count - val_count)
+            )
+
+            for split_name, (segment_start, segment_end) in zip(split_names, ranges):
+                _append_sequences_to_split(
+                    recording,
+                    split_name=split_name,
+                    segment_start=segment_start,
+                    segment_end=segment_end,
+                    seq_len=seq_len,
+                    seq_stride=seq_stride,
+                    split_buffers=split_buffers,
+                )
+
+    return _finalize_sequence_splits(
+        split_buffers,
+        feature_names=feature_names or [],
+        target_names=target_names or [],
+        split_kind="action-stratified",
+    )
+
+
+def fit_target_normalizer(
+    target_matrix: np.ndarray,
+    *,
+    method: str = "zscore",
+    mu: float = DEFAULT_MU_LAW_MU,
+) -> dict:
+    """Fit target normalization statistics using the training split only."""
     targets = np.asarray(target_matrix, dtype=np.float32)
-    mean = targets.mean(axis=0, dtype=np.float64).astype(np.float32)
-    std = targets.std(axis=0, dtype=np.float64).astype(np.float32)
-    return {
-        "mean": mean,
-        "std": np.maximum(std, 1e-6).astype(np.float32),
-    }
+    if method == "zscore":
+        mean = targets.mean(axis=0, dtype=np.float64).astype(np.float32)
+        std = targets.std(axis=0, dtype=np.float64).astype(np.float32)
+        return {
+            "method": "zscore",
+            "mean": mean,
+            "std": np.maximum(std, 1e-6).astype(np.float32),
+        }
+    if method == "mu_law":
+        center = targets.mean(axis=0, dtype=np.float64).astype(np.float32)
+        centered = targets - center
+        scale = np.max(np.abs(centered), axis=0).astype(np.float32)
+        if mu <= 0.0:
+            raise ValueError("mu must be positive for mu-law normalization")
+        return {
+            "method": "mu_law",
+            "center": center,
+            "scale": np.maximum(scale, 1e-6).astype(np.float32),
+            "mu": float(mu),
+        }
+    raise ValueError(f"unsupported target normalization method: {method}")
 
 
 def apply_target_normalizer(target_matrix: np.ndarray, stats: dict) -> np.ndarray:
     """Apply precomputed target normalization."""
     targets = np.asarray(target_matrix, dtype=np.float32)
-    mean = np.asarray(stats["mean"], dtype=np.float32)
-    std = np.asarray(stats["std"], dtype=np.float32)
-    return ((targets - mean) / std).astype(np.float32)
+    method = stats.get("method", "zscore")
+    if method == "zscore":
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        std = np.asarray(stats["std"], dtype=np.float32)
+        return ((targets - mean) / std).astype(np.float32)
+    if method == "mu_law":
+        center = np.asarray(stats["center"], dtype=np.float32)
+        scale = np.asarray(stats["scale"], dtype=np.float32)
+        mu = float(stats["mu"])
+        scaled = (targets - center) / scale
+        compressed = np.sign(scaled) * (np.log1p(mu * np.abs(scaled)) / np.log1p(mu))
+        return compressed.astype(np.float32)
+    raise ValueError(f"unsupported target normalization method: {method}")
 
 
 def inverse_target_normalizer(target_matrix: np.ndarray, stats: dict) -> np.ndarray:
     """Map normalized targets back into the original angle scale."""
     targets = np.asarray(target_matrix, dtype=np.float32)
-    mean = np.asarray(stats["mean"], dtype=np.float32)
-    std = np.asarray(stats["std"], dtype=np.float32)
-    return (targets * std + mean).astype(np.float32)
+    method = stats.get("method", "zscore")
+    if method == "zscore":
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        std = np.asarray(stats["std"], dtype=np.float32)
+        return (targets * std + mean).astype(np.float32)
+    if method == "mu_law":
+        center = np.asarray(stats["center"], dtype=np.float32)
+        scale = np.asarray(stats["scale"], dtype=np.float32)
+        mu = float(stats["mu"])
+        expanded = np.sign(targets) * (np.expm1(np.abs(targets) * np.log1p(mu)) / mu)
+        return (expanded * scale + center).astype(np.float32)
+    raise ValueError(f"unsupported target normalization method: {method}")
 
 
 def normalize_sequence_inputs(
@@ -599,17 +917,24 @@ def normalize_sequence_inputs(
         recording_ids=split.recording_ids,
         feature_names=split.feature_names,
         target_names=split.target_names,
+        action_labels=split.action_labels,
+        repetition_labels=split.repetition_labels,
     )
 
 
 def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """Compute per-target and averaged MAE, RMSE, and R2."""
+    """Compute per-target and averaged MAE, normalized MAE, RMSE, and R2."""
     truth = np.asarray(y_true, dtype=np.float32)
     pred = np.asarray(y_pred, dtype=np.float32)
     error = pred - truth
 
     mae = np.mean(np.abs(error), axis=0)
     rmse = np.sqrt(np.mean(np.square(error), axis=0))
+    target_min = np.min(truth, axis=0)
+    target_max = np.max(truth, axis=0)
+    target_range = target_max - target_min
+    safe_range = np.maximum(target_range, 1e-6)
+    normalized_mae = mae / safe_range
 
     ss_res = np.sum(np.square(error), axis=0)
     target_mean = np.mean(truth, axis=0, keepdims=True)
@@ -621,12 +946,40 @@ def compute_regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
     return {
         "mae_by_target": mae.astype(np.float32),
+        "normalized_mae_by_target": normalized_mae.astype(np.float32),
+        "target_range_by_target": target_range.astype(np.float32),
         "rmse_by_target": rmse.astype(np.float32),
         "r2_by_target": r2.astype(np.float32),
         "mae_mean": float(np.mean(mae)),
+        "normalized_mae_mean": float(np.mean(normalized_mae)),
         "rmse_mean": float(np.mean(rmse)),
         "r2_mean": float(np.mean(r2)),
     }
+
+
+def compute_grouped_regression_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    group_labels: np.ndarray | None,
+) -> dict[str, dict]:
+    """Compute regression metrics separately for each integer group label."""
+    if group_labels is None:
+        return {}
+
+    labels = np.asarray(group_labels)
+    if labels.ndim != 1:
+        raise ValueError("group_labels must be 1-D")
+    if labels.shape[0] != np.asarray(y_true).shape[0]:
+        raise ValueError("group_labels must align with y_true rows")
+
+    grouped_metrics: dict[str, dict] = {}
+    for label in np.unique(labels):
+        mask = labels == label
+        grouped_metrics[str(int(label))] = compute_regression_metrics(
+            np.asarray(y_true)[mask],
+            np.asarray(y_pred)[mask],
+        )
+    return grouped_metrics
 
 
 def predict_sequences(
@@ -662,14 +1015,22 @@ def evaluate_split(
     y_pred = inverse_target_normalizer(pred_norm, target_stats)
     y_true = inverse_target_normalizer(split.y, target_stats)
     metrics = compute_regression_metrics(y_true, y_pred)
+    per_action_metrics = compute_grouped_regression_metrics(
+        y_true,
+        y_pred,
+        split.action_labels,
+    )
 
     return {
         "y_true": y_true,
         "y_pred": y_pred,
         "metrics": metrics,
+        "per_action_metrics": per_action_metrics,
         "time_s": split.time_s,
         "alignment_indices": split.alignment_indices,
         "recording_ids": split.recording_ids,
+        "action_labels": split.action_labels,
+        "repetition_labels": split.repetition_labels,
         "target_names": split.target_names,
     }
 
@@ -835,8 +1196,16 @@ def train_cfc_regressor(config: CfCTrainingConfig) -> dict:
     for split_name, split in sequence_splits.items():
         summarize_split(split_name, split)
 
-    x_stats = fit_feature_normalizer(sequence_splits["train"].x.reshape(-1, sequence_splits["train"].x.shape[-1]))
-    y_stats = fit_target_normalizer(sequence_splits["train"].y)
+    x_stats = fit_feature_normalizer(
+        sequence_splits["train"].x.reshape(-1, sequence_splits["train"].x.shape[-1]),
+        method=config.feature_normalization,
+        mu=config.mu_law_mu,
+    )
+    y_stats = fit_target_normalizer(
+        sequence_splits["train"].y,
+        method=config.target_normalization,
+        mu=config.mu_law_mu,
+    )
 
     normalized_splits = {
         split_name: normalize_sequence_inputs(split, x_stats=x_stats, y_stats=y_stats)

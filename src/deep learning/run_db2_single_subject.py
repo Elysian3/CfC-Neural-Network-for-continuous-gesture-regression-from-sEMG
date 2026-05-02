@@ -45,10 +45,46 @@ def parse_args() -> argparse.Namespace:
         help="Subject id used for training, validation, and test splits.",
     )
     parser.add_argument(
+        "--target-source",
+        type=str,
+        default="glove",
+        help="Continuous target family to use, such as 'glove' or 'inclin'.",
+    )
+    parser.add_argument(
         "--target-column",
         type=int,
         default=DEFAULT_TARGET_COLUMN,
-        help="Zero-based glove column used as the continuous regression target.",
+        help="Zero-based column inside the selected target source.",
+    )
+    parser.add_argument(
+        "--target-offset-samples",
+        type=int,
+        default=None,
+        help="Target alignment shift in samples. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--zc-threshold",
+        type=float,
+        default=None,
+        help="Explicit zero-crossing threshold. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--ssc-threshold",
+        type=float,
+        default=None,
+        help="Explicit slope-sign-change threshold. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--feature-normalization",
+        choices=("zscore", "mu_law"),
+        default=None,
+        help="Feature normalization method. Defaults to the core training config value.",
+    )
+    parser.add_argument(
+        "--target-normalization",
+        choices=("zscore", "mu_law"),
+        default=None,
+        help="Target normalization method. Defaults to the core training config value.",
     )
     parser.add_argument(
         "--max-epochs",
@@ -67,6 +103,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="auto",
         help="Training device string passed through to the core trainer.",
+    )
+    parser.add_argument(
+        "--max-windows-per-file",
+        type=int,
+        default=None,
+        help="Optional cap for fast smoke runs. Defaults to the core training config value.",
     )
     parser.add_argument(
         "--output-dir",
@@ -168,6 +210,7 @@ def run_single_subject_experiment(args: argparse.Namespace) -> dict[str, Any]:
 
     base_config = build_best_cfc_config(
         db2_dir=args.db2_dir,
+        target_source=args.target_source,
         device=args.device,
     )
     subject_files = discover_subject_recordings(
@@ -176,31 +219,55 @@ def run_single_subject_experiment(args: argparse.Namespace) -> dict[str, Any]:
         subject_id=args.subject,
     )
 
-    config = build_best_cfc_config(
-        db2_dir=base_config.db2_dir,
-        split_strategy="blocked_time",
-        source_files=subject_files,
-        target_columns=(args.target_column,),
-        max_epochs=args.max_epochs,
-        early_stopping_patience=args.early_stopping_patience,
-        device=args.device,
+    overrides = {
+        "db2_dir": base_config.db2_dir,
+        "split_strategy": "blocked_time",
+        "source_files": subject_files,
+        "target_source": args.target_source,
+        "target_columns": (args.target_column,),
+        "max_epochs": args.max_epochs,
+        "early_stopping_patience": args.early_stopping_patience,
+        "device": args.device,
+    }
+    optional_override_fields = (
+        "target_offset_samples",
+        "zc_threshold",
+        "ssc_threshold",
+        "feature_normalization",
+        "target_normalization",
+        "max_windows_per_file",
     )
+    for field_name in optional_override_fields:
+        value = getattr(args, field_name)
+        if value is not None:
+            overrides[field_name] = value
+
+    config = build_best_cfc_config(**overrides)
 
     print("Single-subject protocol")
     print(f"  subject      : {args.subject}")
     print(f"  target source: {config.target_source}")
     print(f"  target column: {args.target_column}")
+    print(f"  target offset: {config.target_offset_samples} samples")
+    print(f"  normalization: x={config.feature_normalization}, y={config.target_normalization}")
+    print(f"  ZC/SSC thresh: {config.zc_threshold} / {config.ssc_threshold}")
     print(f"  source files : {list(subject_files)}")
 
     results = train_cfc_regressor(config)
 
-    figure_path = output_dir / f"{args.subject}_target{args.target_column}_prediction.png"
+    figure_path = output_dir / (
+        f"{args.subject}_{config.target_source}_target{args.target_column}"
+        f"_offset{config.target_offset_samples}_prediction.png"
+    )
     results["prediction_figure"].savefig(figure_path, dpi=200, bbox_inches="tight")
     plt.close(results["prediction_figure"])
 
     summary = {
         "protocol": "single_subject_blocked_time",
         "subject": args.subject,
+        "target_source": config.target_source,
+        "target_column": args.target_column,
+        "target_offset_samples": config.target_offset_samples,
         "source_files": list(subject_files),
         "config": make_jsonable(asdict(config)),
         "best_epoch": make_jsonable(summarize_best_epoch(results["history"])),

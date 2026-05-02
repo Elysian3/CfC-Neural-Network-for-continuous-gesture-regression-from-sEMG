@@ -147,7 +147,9 @@ def align_targets_to_windows(
         raise ValueError("offset_samples is not supported when mode='mean'")
 
     anchor_indices = _resolve_anchor_indices(window_starts, window_ends, mode) + int(offset_samples)
-    anchor_indices = np.clip(anchor_indices, 0, target_array.shape[0] - 1).astype(np.int32)
+    if np.any((anchor_indices < 0) | (anchor_indices >= target_array.shape[0])):
+        raise ValueError("target alignment anchors must be inside the target sample range")
+    anchor_indices = anchor_indices.astype(np.int32)
 
     if mode == "mean":
         aligned = np.vstack(
@@ -190,8 +192,8 @@ def sliding_window(
         it matches online decoding best: the model sees the latest EMG in the
         window and predicts the target at the end of that same window.
     target_offset_samples:
-        Optional time shift for sample-based alignment. Keep it at zero until
-        you intentionally study EMG-to-angle lag.
+        Optional time shift for sample-based alignment. Shifted windows whose
+        target anchor would fall outside the recording are discarded.
     """
     emg_array = np.asarray(emg_filtered, dtype=np.float32)
     if emg_array.ndim != 2:
@@ -207,6 +209,22 @@ def sliding_window(
     window_ends = (window_starts + window_size).astype(np.int32)
     window_centers = (window_starts + ((window_size - 1) // 2)).astype(np.int32)
 
+    target_array = None
+    resolved_target_names = None
+    if targets is not None:
+        target_array = _normalize_target_array(targets, n_samples)
+        resolved_target_names = _normalize_target_names(target_names, target_array.shape[1], target_prefix)
+
+        if target_mode != "mean":
+            shifted_anchors = _resolve_anchor_indices(window_starts, window_ends, target_mode) + int(target_offset_samples)
+            valid_windows = (shifted_anchors >= 0) & (shifted_anchors < target_array.shape[0])
+            if not np.any(valid_windows):
+                raise ValueError("target_offset_samples leaves no windows with in-range target anchors")
+            window_starts = window_starts[valid_windows]
+            window_ends = window_ends[valid_windows]
+            window_centers = window_centers[valid_windows]
+            n_windows = int(window_starts.shape[0])
+
     unrectified = np.empty((n_windows, window_size, n_channels), dtype=np.float32)
     rectified = np.empty_like(unrectified)
 
@@ -217,11 +235,8 @@ def sliding_window(
 
     target_values = None
     target_alignment_indices = None
-    resolved_target_names = None
 
-    if targets is not None:
-        target_array = _normalize_target_array(targets, n_samples)
-        resolved_target_names = _normalize_target_names(target_names, target_array.shape[1], target_prefix)
+    if target_array is not None:
         target_values, target_alignment_indices = align_targets_to_windows(
             target_array,
             window_starts,
