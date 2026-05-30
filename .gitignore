@@ -1,6 +1,5 @@
 # ── Datasets (exceed GitHub 100 MB file-size limit) ──────────────────────────
 src/data/
-reference files/*
 .omc/
 .omx/
 
@@ -53,3 +52,7 @@ TODO.md
 AGENTS.md
 CLAUDE.md
 
+reference files/Data_Sheet_1.PDF
+reference files/fnins-18-1306050.pdf
+reference files/DB8_glove.png
+.gitignore

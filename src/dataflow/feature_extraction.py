@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - package-style fallback
 
 
 FEATURE_ORDER = ("mav", "mavs", "wl", "zc", "ssc")
+SUPPORTED_FEATURES = ("mav", "mavs", "wl", "zc", "ssc", "rms")
 DEFAULT_MU_LAW_MU = 255.0
 
 
@@ -110,6 +111,11 @@ def waveform_length(unrectified_windows: np.ndarray) -> np.ndarray:
     return np.sum(np.abs(np.diff(unrectified_windows, axis=1)), axis=1, dtype=np.float64).astype(np.float32)
 
 
+def root_mean_square(unrectified_windows: np.ndarray) -> np.ndarray:
+    """Compute RMS amplitude for every window and channel."""
+    return np.sqrt(np.mean(np.square(unrectified_windows), axis=1, dtype=np.float64)).astype(np.float32)
+
+
 def zero_crossings(
     unrectified_windows: np.ndarray,
     threshold: float | np.ndarray | None = None,
@@ -168,6 +174,7 @@ def slope_sign_changes(
 def extract_emg_features(
     windows: dict,
     *,
+    feature_order: Iterable[str] = FEATURE_ORDER,
     zc_threshold: float | np.ndarray | None = None,
     ssc_threshold: float | np.ndarray | None = None,
     threshold_scale: float = 0.01,
@@ -180,25 +187,43 @@ def extract_emg_features(
     """
     unrectified, rectified = _validate_windows(windows)
     n_windows, _, n_channels = unrectified.shape
+    selected_feature_order = tuple(str(feature_name) for feature_name in feature_order)
+    invalid_features = sorted(set(selected_feature_order) - set(SUPPORTED_FEATURES))
+    if invalid_features:
+        raise ValueError(f"unsupported EMG features: {invalid_features}")
+    if not selected_feature_order:
+        raise ValueError("feature_order cannot be empty")
 
     mav = mean_absolute_value(rectified)
     mavs = mean_absolute_value_slope(mav)
     wl = waveform_length(unrectified)
+    rms = root_mean_square(unrectified)
     zc, resolved_zc = zero_crossings(unrectified, threshold=zc_threshold, default_scale=threshold_scale)
     ssc, resolved_ssc = slope_sign_changes(unrectified, threshold=ssc_threshold, default_scale=threshold_scale)
+    feature_by_name = {
+        "mav": mav,
+        "mavs": mavs,
+        "wl": wl,
+        "zc": zc.astype(np.float32),
+        "ssc": ssc.astype(np.float32),
+        "rms": rms,
+    }
 
     # Tensor shape is (windows, channels, features). This is the most natural
     # representation for inspection because each channel keeps its feature block.
-    feature_tensor = np.stack((mav, mavs, wl, zc.astype(np.float32), ssc.astype(np.float32)), axis=-1)
+    feature_tensor = np.stack(
+        tuple(feature_by_name[feature_name] for feature_name in selected_feature_order),
+        axis=-1,
+    )
 
     # The flattened matrix is convenient for baseline regression models and for
     # later sequence construction. Channel-major ordering keeps each channel's
     # feature block contiguous.
-    feature_matrix = feature_tensor.reshape(n_windows, n_channels * len(FEATURE_ORDER)).astype(np.float32)
+    feature_matrix = feature_tensor.reshape(n_windows, n_channels * len(selected_feature_order)).astype(np.float32)
     channel_feature_names = [
         f"ch{channel + 1}_{feature_name}"
         for channel in range(n_channels)
-        for feature_name in FEATURE_ORDER
+        for feature_name in selected_feature_order
     ]
 
     target_values = windows.get("target_values")
@@ -209,9 +234,10 @@ def extract_emg_features(
         "mav": mav,
         "mavs": mavs,
         "wl": wl,
+        "rms": rms,
         "zc": zc.astype(np.float32),
         "ssc": ssc.astype(np.float32),
-        "feature_order": list(FEATURE_ORDER),
+        "feature_order": list(selected_feature_order),
         "feature_tensor": feature_tensor,
         "feature_matrix": feature_matrix,
         "channel_feature_names": channel_feature_names,
@@ -314,6 +340,7 @@ def run_feature_pipeline(
     stride_ms: int = STRIDE_MS,
     target_mode: str = "last",
     target_offset_samples: int = 0,
+    feature_order: Iterable[str] = FEATURE_ORDER,
     zc_threshold: float | np.ndarray | None = None,
     ssc_threshold: float | np.ndarray | None = None,
     threshold_scale: float = 0.01,
@@ -354,6 +381,7 @@ def run_feature_pipeline(
     )
     feature_set = extract_emg_features(
         windows,
+        feature_order=feature_order,
         zc_threshold=zc_threshold,
         ssc_threshold=ssc_threshold,
         threshold_scale=threshold_scale,

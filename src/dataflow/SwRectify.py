@@ -35,8 +35,8 @@ TargetMode = Literal["last", "center", "mean"]
 def _resolve_window_geometry(
     n_samples: int,
     fs: float,
-    window_ms: int,
-    stride_ms: int,
+    window_ms: float,
+    stride_ms: float,
 ) -> tuple[int, int, int]:
     """Convert window settings from milliseconds to sample counts."""
     if window_ms <= 0:
@@ -60,7 +60,7 @@ def _resolve_window_geometry(
     return window_size, stride, n_windows
 
 
-def _normalize_target_array(targets: np.ndarray, n_samples: int) -> np.ndarray:
+def _1d_to_2d_of_target_array(targets: np.ndarray, n_samples: int) -> np.ndarray:
     """
     Ensure targets use shape (n_samples, n_targets).
 
@@ -166,8 +166,8 @@ def sliding_window(
     targets: np.ndarray | None = None,
     *,
     fs: float = FS,
-    window_ms: int = WIN_MS,
-    stride_ms: int = STRIDE_MS,
+    window_ms: float = WIN_MS,
+    stride_ms: float = STRIDE_MS,
     target_mode: TargetMode = "last",
     target_offset_samples: int = 0,
     target_names: Iterable[str] | None = None,
@@ -212,7 +212,7 @@ def sliding_window(
     target_array = None
     resolved_target_names = None
     if targets is not None:
-        target_array = _normalize_target_array(targets, n_samples)
+        target_array = _1d_to_2d_of_target_array(targets, n_samples)
         resolved_target_names = _normalize_target_names(target_names, target_array.shape[1], target_prefix)
 
         if target_mode != "mean":

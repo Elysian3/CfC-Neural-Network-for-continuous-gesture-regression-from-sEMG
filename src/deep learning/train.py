@@ -52,7 +52,7 @@ class CfCTrainingConfig:
     """
 
     db2_dir: Path = REPO_ROOT / "src" / "data" / "DB2"
-    split_strategy: str = "blocked_time"
+    split_strategy: str = "blocked_time"  #The mode of split of data: recor ding -> file-level; blocked_time -> continguous time block 
     train_files: tuple[str, ...] = ()
     val_files: tuple[str, ...] = ()
     test_files: tuple[str, ...] = ()
@@ -62,9 +62,10 @@ class CfCTrainingConfig:
     target_mapping: str | None = None
     target_mapping_source: str = "glove"
     target_mapping_version: str | None = None
-    window_ms: int = WIN_MS
-    stride_ms: int = STRIDE_MS
-    target_mode: str = "last"
+    window_ms: float = WIN_MS
+    stride_ms: float = STRIDE_MS
+    feature_order: tuple[str, ...] = ("mav", "mavs", "wl", "zc", "ssc")
+    target_mode: str = "last"   
     target_offset_samples: int = DEFAULT_TARGET_OFFSET_SAMPLES
     zc_threshold: float | None = DEFAULT_ZC_SSC_THRESHOLD
     ssc_threshold: float | None = DEFAULT_ZC_SSC_THRESHOLD
@@ -75,10 +76,12 @@ class CfCTrainingConfig:
     blocked_train_fraction: float = 0.7
     blocked_val_fraction: float = 0.15
     blocked_test_fraction: float = 0.15
-    blocked_gap_windows: int = 16
+    blocked_gap_windows: int = 16 # buffer windows, for the division of data and the prevention of leakage
     seq_len: int = 8
     seq_stride: int = 1
     hidden_units: int = 64
+    model_family: str = "autoncp"
+    cfc_dropout: float = 0.0
     batch_size: int = 128
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
@@ -89,7 +92,7 @@ class CfCTrainingConfig:
     num_workers: int = 0
     device: str = "auto"
     plot_target_index: int = 0
-    plot_max_points: int = 500
+    plot_max_points: int = 500 # Maximum amount of points to be printed
     max_windows_per_file: int | None = None
 
 
@@ -111,11 +114,12 @@ def build_best_cfc_config(**overrides) -> CfCTrainingConfig:
         "target_mapping_version": None,
         "window_ms": WIN_MS,
         "stride_ms": STRIDE_MS,
+        "feature_order": ("mav", "mavs", "wl", "zc", "ssc"),
         "target_mode": "last",
         "target_offset_samples": DEFAULT_TARGET_OFFSET_SAMPLES,
         "zc_threshold": DEFAULT_ZC_SSC_THRESHOLD,
         "ssc_threshold": DEFAULT_ZC_SSC_THRESHOLD,
-        "zc_ssc_threshold_scale": 0.01,
+        "zc_ssc_threshold_scale": 0.01,    # need to be fixed
         "feature_normalization": "mu_law",
         "target_normalization": "mu_law",
         "mu_law_mu": DEFAULT_MU_LAW_MU,
@@ -214,6 +218,36 @@ class WeightedSmoothL1Loss(nn.Module):
         return (per_target * self.target_weights).mean()
 
 
+class GradientReversalFunction(torch.autograd.Function):
+    """Reverse the gradient during backward pass for adversarial domain adaptation."""
+
+    @staticmethod
+    def forward(ctx, x, lambda_):
+        ctx.lambda_ = lambda_
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -ctx.lambda_ * grad_output, None
+
+
+class DomainDiscriminator(nn.Module):
+    """Binary domain classifier for GRL-based domain adaptation."""
+
+    def __init__(self, in_dim=128, hidden=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class CfCRegressor(nn.Module):
     """
     Small many-to-one CfC regressor.
@@ -225,12 +259,73 @@ class CfCRegressor(nn.Module):
 
     def __init__(self, input_dim: int, output_dim: int, hidden_units: int) -> None:
         super().__init__()
+        self.model_family = "autoncp"
         wiring = AutoNCP(hidden_units, output_dim)
         self.cfc = CfC(input_dim, wiring, batch_first=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y_sequence, _ = self.cfc(x)
         return y_sequence[:, -1, :]
+
+
+class DenseCfCLinearRegressor(nn.Module):
+    """Dense CfC encoder with an explicit linear DoA readout head."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_units: int,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.model_family = "dense_cfc_linear"
+        self.cfc = CfC(
+            input_dim,
+            hidden_units,
+            batch_first=True,
+            return_sequences=True,
+            backbone_dropout=dropout,
+        )
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.head = nn.Linear(hidden_units, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y_sequence, _ = self.cfc(x)
+        final_state = self.dropout(y_sequence[:, -1, :])
+        return self.head(final_state)
+
+    def forward_with_features(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return (prediction, pre_dropout_state) tuple.
+
+        The pre-dropout state is the CfC output at the final timestep before
+        dropout is applied, useful for auxiliary tasks such as domain
+        adversarial training.
+        """
+        y_sequence, _ = self.cfc(x)
+        pre_dropout_state = y_sequence[:, -1, :]
+        final_state = self.dropout(pre_dropout_state)
+        return self.head(final_state), pre_dropout_state
+
+
+def build_cfc_regressor(
+    *,
+    input_dim: int,
+    output_dim: int,
+    hidden_units: int,
+    model_family: str = "autoncp",
+    cfc_dropout: float = 0.0,
+) -> nn.Module:
+    if model_family == "autoncp":
+        return CfCRegressor(input_dim=input_dim, output_dim=output_dim, hidden_units=hidden_units)
+    if model_family == "dense_cfc_linear":
+        return DenseCfCLinearRegressor(
+            input_dim=input_dim,
+            output_dim=output_dim,
+            hidden_units=hidden_units,
+            dropout=cfc_dropout,
+        )
+    raise ValueError(f"unsupported model_family: {model_family}")
 
 
 def set_random_seed(seed: int) -> None:
@@ -240,8 +335,6 @@ def set_random_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
-
 def resolve_device(requested_device: str) -> torch.device:
     """Choose the training device from a simple string flag."""
     if requested_device == "auto":
@@ -372,6 +465,7 @@ def load_recording_features(file_path: Path, config: CfCTrainingConfig) -> Recor
         target_mapping_source=config.target_mapping_source,
         window_ms=config.window_ms,
         stride_ms=config.stride_ms,
+        feature_order=config.feature_order,
         target_mode=config.target_mode,
         target_offset_samples=config.target_offset_samples,
         zc_threshold=config.zc_threshold,
@@ -1214,10 +1308,12 @@ def train_cfc_regressor(config: CfCTrainingConfig) -> dict:
 
     train_loader = make_train_loader(normalized_splits["train"], config)
 
-    model = CfCRegressor(
+    model = build_cfc_regressor(
         input_dim=normalized_splits["train"].x.shape[-1],
         output_dim=normalized_splits["train"].y.shape[-1],
         hidden_units=config.hidden_units,
+        model_family=config.model_family,
+        cfc_dropout=config.cfc_dropout,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),

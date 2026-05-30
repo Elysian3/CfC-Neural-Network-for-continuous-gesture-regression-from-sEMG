@@ -151,6 +151,41 @@ class RegressionPipelineTests(unittest.TestCase):
         self.assertEqual(regression["target_names"], ["angle_a"])
         np.testing.assert_allclose(regression["x"].mean(axis=0), np.zeros(10), atol=1e-5)
 
+    def test_feature_extraction_can_emit_rms_only(self) -> None:
+        windows = {
+            "unrectified": np.array(
+                [
+                    [[3.0, 4.0], [0.0, 0.0]],
+                    [[1.0, 2.0], [1.0, 2.0]],
+                ],
+                dtype=np.float32,
+            ),
+            "rectified": np.array(
+                [
+                    [[3.0, 4.0], [0.0, 0.0]],
+                    [[1.0, 2.0], [1.0, 2.0]],
+                ],
+                dtype=np.float32,
+            ),
+            "window_start_indices": np.array([0, 1], dtype=np.int32),
+            "window_end_indices": np.array([2, 3], dtype=np.int32),
+            "window_center_indices": np.array([0, 1], dtype=np.int32),
+            "window_size": 2,
+            "stride": 1,
+            "window_ms": 100,
+            "stride_ms": 0.5,
+            "fs": 2000.0,
+        }
+
+        feature_set = extract_emg_features(windows, feature_order=("rms",))
+
+        self.assertEqual(feature_set["feature_order"], ["rms"])
+        self.assertEqual(feature_set["feature_tensor"].shape, (2, 2, 1))
+        np.testing.assert_allclose(
+            feature_set["feature_matrix"],
+            np.array([[np.sqrt(4.5), np.sqrt(8.0)], [1.0, 2.0]], dtype=np.float32),
+        )
+
     def test_explicit_zc_ssc_thresholds_are_used(self) -> None:
         windows = sliding_window(
             self.emg - np.mean(self.emg, axis=0, keepdims=True),

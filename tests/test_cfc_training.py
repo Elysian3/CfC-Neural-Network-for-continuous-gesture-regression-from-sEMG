@@ -13,7 +13,12 @@ if str(TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(TRAINING_DIR))
 
 from train import (
+    DenseCfCLinearRegressor,
+    DomainDiscriminator,
+    GradientReversalFunction,
+    build_cfc_regressor,
     RecordingFeatures,
+    SequenceSplit,
     WeightedSmoothL1Loss,
     build_action_stratified_sequence_splits,
     build_blocked_sequence_splits,
@@ -24,13 +29,18 @@ from train import (
     fit_target_normalizer,
     inverse_target_normalizer,
 )
+from run_db2_paper_cfc_finetune import freeze_for_linear_head
 from run_doa5_subject_adaptation import (
+    apply_adaptation_mode,
     assert_selection_summary_is_uncontaminated,
+    limit_split_by_support_seconds,
     omit_split,
+    parse_adaptation_modes,
     parse_args as parse_doa5_args,
     run_doa5_subject_adaptation,
     select_validation_candidate,
     per_doa_pass,
+    validate_support_action_coverage,
 )
 
 
@@ -175,6 +185,95 @@ class CfCTrainingHelpersTests(unittest.TestCase):
         result = per_doa_pass(metrics, target_names)
 
         self.assertEqual(result, {"a": True, "b": True, "c": True, "d": True, "e": False})
+
+    def test_parse_adaptation_modes_rejects_unknown_modes(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported adaptation modes"):
+            parse_adaptation_modes("autoncp_full,bad_mode")
+
+    def test_motor_only_adaptation_freezes_non_motor_layers(self) -> None:
+        class DummyWiredModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.cfc = torch.nn.Module()
+                self.cfc.rnn_cell = torch.nn.Module()
+                self.cfc.rnn_cell.num_layers = 3
+                self.cfc.rnn_cell.layer_0 = torch.nn.Linear(2, 3)
+                self.cfc.rnn_cell.layer_1 = torch.nn.Linear(3, 4)
+                self.cfc.rnn_cell.layer_2 = torch.nn.Linear(4, 5)
+                self.cfc.rnn_cell.layer_2.sparsity_mask = torch.nn.Parameter(torch.ones(4, 5), requires_grad=False)
+
+        model = DummyWiredModel()
+
+        audit = apply_adaptation_mode(model, "autoncp_motor_only")
+
+        self.assertTrue(audit["parameter_mask_valid"])
+        self.assertEqual(audit["matched_trainable_prefixes"], ["cfc.rnn_cell.layer_2."])
+        self.assertTrue(all(name.startswith("cfc.rnn_cell.layer_2.") for name in audit["trainable_param_names"]))
+        self.assertFalse(any(name.endswith("sparsity_mask") for name in audit["trainable_param_names"]))
+        for name, parameter in model.named_parameters():
+            should_train = name.startswith("cfc.rnn_cell.layer_2.") and not name.endswith("sparsity_mask")
+            self.assertEqual(parameter.requires_grad, should_train)
+
+    def test_dense_cfc_linear_head_freeze_only_updates_head(self) -> None:
+        model = build_cfc_regressor(
+            input_dim=12,
+            output_dim=10,
+            hidden_units=32,
+            model_family="dense_cfc_linear",
+        )
+
+        audit = freeze_for_linear_head(model)
+
+        self.assertGreater(audit["trainable_param_count"], 0)
+        self.assertTrue(all(name.startswith("head.") for name in audit["trainable_param_names"]))
+        for name, parameter in model.named_parameters():
+            self.assertEqual(parameter.requires_grad, name.startswith("head."))
+
+    def test_support_seconds_budget_balances_actions_without_exceeding_total(self) -> None:
+        labels = np.repeat(np.array([1, 2, 3], dtype=np.int16), 10)
+        split = SequenceSplit(
+            x=np.zeros((30, 2, 2), dtype=np.float32),
+            y=np.zeros((30, 1), dtype=np.float32),
+            time_s=np.arange(30, dtype=np.float32) * 0.1,
+            alignment_indices=np.arange(30, dtype=np.int32),
+            recording_ids=np.array(["demo"] * 30),
+            feature_names=["a", "b"],
+            target_names=["angle"],
+            action_labels=labels,
+        )
+
+        limited, budget = limit_split_by_support_seconds(
+            split,
+            support_seconds_total=0.9,
+            stride_ms=100,
+            seq_stride=1,
+        )
+
+        self.assertLessEqual(budget["actual_total_seconds"], 0.9 + 1e-9)
+        self.assertEqual(limited.x.shape[0], 9)
+        self.assertEqual(budget["per_action_sequence_counts"], {"1": 3, "2": 3, "3": 3})
+
+    def test_support_coverage_rejects_missing_evaluated_action(self) -> None:
+        def make_split(labels: np.ndarray) -> SequenceSplit:
+            return SequenceSplit(
+                x=np.zeros((labels.size, 1, 1), dtype=np.float32),
+                y=np.zeros((labels.size, 1), dtype=np.float32),
+                time_s=np.arange(labels.size, dtype=np.float32),
+                alignment_indices=np.arange(labels.size, dtype=np.int32),
+                recording_ids=np.array(["demo"] * labels.size),
+                feature_names=["a"],
+                target_names=["angle"],
+                action_labels=labels.astype(np.int16),
+            )
+
+        with self.assertRaisesRegex(ValueError, "zero coverage"):
+            validate_support_action_coverage(
+                {
+                    "train": make_split(np.array([1, 1])),
+                    "val": make_split(np.array([1, 2])),
+                    "test": make_split(np.array([1])),
+                }
+            )
 
     def test_candidate_selection_ranks_by_worst_doa_before_mean_r2(self) -> None:
         weak_mean = candidate_summary("h64_baseline", 64, "baseline", [0.30, 0.80, 0.80, 0.80, 0.80], 10.0)
@@ -366,6 +465,160 @@ class CfCTrainingHelpersTests(unittest.TestCase):
         for split in splits.values():
             self.assertIsNotNone(split.action_labels)
             np.testing.assert_array_equal(np.unique(split.action_labels), np.array([1, 2], dtype=np.int16))
+
+    # --- GRL / DD / ATL smoke tests -------------------------------------------------
+
+    def test_grl_backwards_sign(self) -> None:
+        """GradientReversalFunction negates gradients by -lambda."""
+        x = torch.randn(4, 8, requires_grad=True)
+        lambda_val = 0.5
+
+        y = GradientReversalFunction.apply(x, lambda_val)
+        loss = y.sum()
+        loss.backward()
+
+        self.assertIsNotNone(x.grad)
+        torch.testing.assert_close(
+            x.grad,
+            -lambda_val * torch.ones_like(x),
+            msg="GRL backward should multiply gradient by -lambda",
+        )
+
+    def test_grl_preserves_forward_output(self) -> None:
+        """GradientReversalFunction forward is identity."""
+        x = torch.randn(3, 5)
+        lambda_val = 0.3
+        y = GradientReversalFunction.apply(x, lambda_val)
+        torch.testing.assert_close(y, x, msg="GRL forward must be identity")
+
+    def test_dd_construction(self) -> None:
+        """DomainDiscriminator outputs probabilities in [0, 1] with correct shape."""
+        batch_size = 16
+        in_dim = 128
+        hidden = 128
+
+        dd = DomainDiscriminator(in_dim=in_dim, hidden=hidden)
+        x = torch.randn(batch_size, in_dim)
+        out = dd(x)
+
+        self.assertEqual(out.shape, (batch_size, 1))
+        self.assertTrue(torch.all(out >= 0.0).item(), msg="All DD outputs should be >= 0")
+        self.assertTrue(torch.all(out <= 1.0).item(), msg="All DD outputs should be <= 1")
+
+    def test_forward_with_features(self) -> None:
+        """forward_with_features() returns (prediction, pre_dropout_state) with correct shapes."""
+        batch_size = 4
+        seq_len = 8
+        input_dim = 60
+        output_dim = 5
+        hidden_units = 32
+
+        model = DenseCfCLinearRegressor(input_dim, output_dim, hidden_units, dropout=0.1)
+        model.eval()
+        x = torch.randn(batch_size, seq_len, input_dim)
+
+        pred, pre_dropout = model.forward_with_features(x)
+
+        self.assertEqual(pred.shape, (batch_size, output_dim))
+        self.assertEqual(pre_dropout.shape, (batch_size, hidden_units))
+
+        # Verify pre_dropout is the CfC output BEFORE dropout by comparing norms
+        # Dropout zeroes some elements so ||pre_dropout|| >= ||post_dropout|| in expectation
+        with torch.no_grad():
+            y_seq, _ = model.cfc(x)
+            expected_pre = y_seq[:, -1, :]
+        torch.testing.assert_close(
+            pre_dropout, expected_pre,
+            msg="pre_dropout_state should equal the raw CfC final timestep output",
+        )
+
+    def test_atl_smoke(self) -> None:
+        """One ATL training iteration on synthetic data completes without error."""
+        n_source = 10
+        n_target = 5
+        input_dim = 60
+        output_dim = 5
+        hidden_units = 32
+        seq_len = 8
+
+        source_x = torch.randn(n_source, seq_len, input_dim)
+        source_y = torch.randn(n_source, output_dim)
+        target_x = torch.randn(n_target, seq_len, input_dim)
+        target_y = torch.randn(n_target, output_dim)
+
+        model = DenseCfCLinearRegressor(input_dim, output_dim, hidden_units, dropout=0.1)
+        model.train()
+
+        dd = DomainDiscriminator(in_dim=hidden_units, hidden=128)
+
+        cfc_optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+        dd_optimizer = torch.optim.AdamW(dd.parameters(), lr=1e-3)
+
+        loss_fn = torch.nn.MSELoss()
+        bce_fn = torch.nn.BCELoss()
+
+        lambda_val = 0.5
+
+        # Single ATL iteration following the same logic as _atl_training_epoch
+        combined_x = torch.cat([source_x, target_x], dim=0)
+        combined_y = torch.cat([source_y, target_y], dim=0)
+
+        cfc_optimizer.zero_grad(set_to_none=True)
+        dd_optimizer.zero_grad(set_to_none=True)
+
+        pred, features = model.forward_with_features(combined_x)
+
+        mse_loss = loss_fn(pred, combined_y)
+
+        n_src = source_x.shape[0]
+        src_feat = features[:n_src]
+        tgt_feat = features[n_src:]
+
+        src_rev = GradientReversalFunction.apply(src_feat, lambda_val)
+        tgt_rev = GradientReversalFunction.apply(tgt_feat, lambda_val)
+
+        src_domain_pred = dd(src_rev)
+        tgt_domain_pred = dd(tgt_rev)
+
+        src_domain_loss = bce_fn(src_domain_pred, torch.zeros(n_src, 1))
+        tgt_domain_loss = bce_fn(tgt_domain_pred, torch.ones(n_target, 1))
+        domain_loss = src_domain_loss + tgt_domain_loss
+
+        total_loss = mse_loss + lambda_val * domain_loss
+        total_loss.backward()
+
+        cfc_optimizer.step()
+        dd_optimizer.step()
+
+        # Verify all losses are finite
+        self.assertTrue(torch.isfinite(mse_loss).all(), msg="MSE loss should be finite")
+        self.assertTrue(torch.isfinite(domain_loss).all(), msg="Domain loss should be finite")
+        self.assertTrue(torch.isfinite(total_loss).all(), msg="Total loss should be finite")
+
+        # Verify gradients flowed to model parameters
+        model_grads = [p.grad for p in model.parameters() if p.requires_grad and p.grad is not None]
+        self.assertGreater(len(model_grads), 0, msg="CfC model should have non-None gradients")
+        self.assertTrue(
+            any(torch.isfinite(g).all() and torch.any(g != 0.0) for g in model_grads),
+            msg="At least one CfC parameter should have non-zero finite gradient",
+        )
+
+        # Verify gradients flowed to DD parameters
+        dd_grads = [p.grad for p in dd.parameters() if p.grad is not None]
+        self.assertGreater(len(dd_grads), 0, msg="DD should have non-None gradients")
+        self.assertTrue(
+            any(torch.isfinite(g).all() and torch.any(g != 0.0) for g in dd_grads),
+            msg="At least one DD parameter should have non-zero finite gradient",
+        )
+
+        # Verify DD outputs are valid probabilities
+        with torch.no_grad():
+            model.eval()
+            dd.eval()
+            _, test_feat = model.forward_with_features(target_x)
+            test_dd_out = dd(GradientReversalFunction.apply(test_feat, lambda_val))
+        self.assertTrue(torch.all(test_dd_out >= 0.0).item())
+        self.assertTrue(torch.all(test_dd_out <= 1.0).item())
 
 
 if __name__ == "__main__":
