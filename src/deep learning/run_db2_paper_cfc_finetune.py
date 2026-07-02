@@ -15,33 +15,36 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from run_db2_subject_adaptation import (
-    discover_target_files,
-    make_jsonable,
-    save_summary,
-    subject_sort_key,
-    summarize_best_epoch,
-)
 from train import (
     DomainDiscriminator,
     GradientReversalFunction,
     SequenceSplit,
     build_best_cfc_config,
+    build_cfc_regressor,
     build_sequence_split,
+    discover_target_files,
     evaluate_split,
     fit_feature_normalizer,
     fit_target_normalizer,
     list_db2_files,
     load_recording_features,
+    make_jsonable,
     make_train_loader,
     normalize_sequence_inputs,
     resolve_device,
+    save_summary,
+    subject_sort_key,
+    summarize_best_epoch,
     train_one_epoch,
-    build_cfc_regressor,
 )
 from datapreprocess import load_data, preprocess_emg
 from SwRectify import sliding_window
-from feature_extraction import extract_emg_features
+from feature_extraction import _compute_rest_thresholds, extract_emg_features
+from doa_mapping import (
+    apply_linear_doa_mapping, DOA5_NAMES,
+    GLOVE_COLUMN_NAMES, GLOVE_COLUMN_INDICES, GLOVE_COLUMNS_MAPPING_NAME,
+    glove_to_doa,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -88,7 +91,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--window-ms", type=float, default=200.0)
     parser.add_argument("--stride-ms", type=float, default=50.0)
-    parser.add_argument("--mu-law-mu", type=float, default=220.0)
+    parser.add_argument("--mu-law-mu", type=float, default=1_048_576.0)  # 2^20
     parser.add_argument("--hidden-units", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-epochs", type=int, default=400)
@@ -100,7 +103,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-offset-samples", type=int, default=200)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--cfc-dropout", type=float, default=0.1)
-    parser.add_argument("--target-mapping", type=str, default="doa5")
+    parser.add_argument("--feature-order", type=str, default="mav,mavs,wl,zc,ssc",
+                        help="Comma-separated feature names (must be subset of supported features)")
+    parser.add_argument("--target-mapping", type=str, default="doa5",
+                        help="Target mapping: 'doa5' (5 DoA angles) or 'glove_columns' (13 individual glove sensors)")
     parser.add_argument("--train-repetitions-per-action", type=int, default=4)
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="auto")
@@ -109,7 +115,7 @@ def parse_args() -> argparse.Namespace:
         "--model-family",
         type=str,
         default="dense_cfc_linear",
-        choices=["autoncp", "dense_cfc_linear"],
+        choices=["dense_cfc_linear"],
     )
     parser.add_argument(
         "--augment-prob",
@@ -118,8 +124,8 @@ def parse_args() -> argparse.Namespace:
         help="Probability of augmentation per batch. 1.0 = always, 0.0 = never",
     )
     parser.add_argument("--enable-atl", action="store_true", default=False)
-    parser.add_argument("--atl-lambda-cap", type=float, default=1.0,
-                        help="Maximum lambda for GRL gradient scaling in ATL (0.3-0.5 recommended)")
+    parser.add_argument("--atl-lambda-cap", type=float, default=0.25,
+                        help="Maximum lambda for GRL gradient scaling in ATL (0.2-0.3 recommended; higher values destabilize regression)")
     parser.add_argument("--skip-fine-tune", action="store_true", default=False,
                         help="Pretrain only, skip fine-tuning (saves pretrain checkpoint)")
     parser.add_argument("--resume-pretrain", type=Path, default=None,
@@ -167,6 +173,16 @@ def load_subject_filtered_split(
     # each short action segment independently.
     emg_filtered = preprocess_emg(emg, fs=2000.0)
 
+    # Compute rest-state thresholds once per recording, reused for all action
+    # segments.  Prefer restimulus over stimulus (matching train.py convention).
+    rest_threshold = _compute_rest_thresholds(
+        emg_filtered,
+        stimulus=restimulus,
+        fs=2000.0,
+        window_ms=config.window_ms,
+        stride_ms=config.stride_ms,
+    )
+
     selected_recordings = []
     target_columns = list(config.target_columns) if config.target_columns else []
     mapping = config.target_mapping
@@ -181,9 +197,11 @@ def load_subject_filtered_split(
 
             # Resolve targets: either apply 5-DoA mapping or use raw glove columns
             if mapping is not None:
-                from doa_mapping import apply_linear_doa_mapping, DOA5_NAMES
                 segment_targets = apply_linear_doa_mapping(glove[start:end], mapping=mapping)
-                target_names = list(DOA5_NAMES)
+                if mapping == GLOVE_COLUMNS_MAPPING_NAME:
+                    target_names = list(GLOVE_COLUMN_NAMES)
+                else:
+                    target_names = list(DOA5_NAMES)
             else:
                 segment_targets = glove[start:end, target_columns]
                 target_names = [f"glove_{column + 1}" for column in target_columns]
@@ -194,12 +212,16 @@ def load_subject_filtered_split(
                 fs=2000.0,
                 window_ms=config.window_ms,
                 stride_ms=config.stride_ms,
-                target_mode=config.target_mode,
                 target_offset_samples=config.target_offset_samples,
                 target_names=target_names,
                 target_prefix="glove",
             )
-            feature_set = extract_emg_features(windows, feature_order=config.feature_order)
+            feature_set = extract_emg_features(
+                windows,
+                feature_order=config.feature_order,
+                zc_threshold=rest_threshold,
+                ssc_threshold=rest_threshold,
+            )
             selected_recordings.append(
                 type("RecordingLike", (), {})()
             )
@@ -621,9 +643,6 @@ def fine_tune_head(
         best_val_mae = float("inf")
         patience_counter = 0
 
-        # Pre-mortem state
-        domain_loss_window: list[float] = []
-
         for epoch in range(1, epochs + 1):
             lambda_val = _compute_dann_lambda(float(epoch)) * atl_lambda_cap
 
@@ -660,34 +679,6 @@ def fine_tune_head(
                 flush=True,
             )
 
-            # Pre-mortem: DD loss too low for too long indicates perfect
-            # domain separation -> cap lambda to prevent gradient explosion
-            domain_loss_window.append(train_metrics["domain_loss"])
-            if len(domain_loss_window) > 10:
-                domain_loss_window.pop(0)
-            if (
-                len(domain_loss_window) >= 10
-                and all(d < 0.01 for d in domain_loss_window)
-                and atl_lambda_cap > 0.5
-            ):
-                atl_lambda_cap = 0.5
-                print(
-                    f"    [pre-mortem] DD loss < 0.01 for 10 epochs; "
-                    f"capping lambda at {atl_lambda_cap}",
-                    flush=True,
-                )
-
-            # Pre-mortem: DD overfitting on source (source acc >> target acc)
-            if (
-                train_metrics["dd_source_acc"] > 0.95
-                and train_metrics["dd_target_acc"] < 0.5
-            ):
-                print(
-                    "    [pre-mortem] DD overfitting on source; "
-                    "increasing DD dropout not supported in current DomainDiscriminator",
-                    flush=True,
-                )
-
             # Validation: MSE-only (no domain loss)
             if val_split is not None and val_split.x.shape[0] > 0:
                 adapted.eval()
@@ -722,12 +713,8 @@ def fine_tune_head(
         return adapted, history, audit
 
     # ---- Standard (non-ATL) branch ----
-    # AutoNCP has no separate linear head — full-model fine-tune with lower LR.
     # DenseCfCLinearRegressor has a .head that can be isolated for head-only FT.
-    if getattr(adapted, "model_family", "") == "autoncp":
-        audit = {"mode": "full_model", "trainable_param_count": sum(p.numel() for p in adapted.parameters()), "total_param_count": sum(p.numel() for p in adapted.parameters()), "trainable_fraction": 1.0}
-    else:
-        audit = freeze_for_linear_head(adapted)
+    audit = freeze_for_linear_head(adapted)
     loader = make_train_loader(support_split, config)
     optimizer = torch.optim.AdamW(
         [parameter for parameter in adapted.parameters() if parameter.requires_grad],
@@ -781,6 +768,24 @@ def fine_tune_head(
     return adapted, history, audit
 
 
+def _compute_doa_metrics_from_glove(
+    y_true_glove: np.ndarray,
+    y_pred_glove: np.ndarray,
+    *,
+    action_labels: np.ndarray | None = None,
+) -> dict:
+    """Convert glove-column predictions to 5-DoA metrics via post-hoc DOA5_W mapping."""
+    from train import compute_regression_metrics, compute_grouped_regression_metrics
+    y_true_doa = glove_to_doa(y_true_glove)
+    y_pred_doa = glove_to_doa(y_pred_glove)
+    metrics = compute_regression_metrics(y_true_doa, y_pred_doa)
+    if action_labels is not None:
+        metrics["per_action"] = compute_grouped_regression_metrics(
+            y_true_doa, y_pred_doa, action_labels,
+        )
+    return metrics
+
+
 def _split_sequence_split_temporal(
     split: SequenceSplit,
     *,
@@ -827,6 +832,13 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     subjects = parse_csv_subjects(args.subjects)
     actions = parse_csv_ints(args.actions)
     glove_columns = parse_csv_ints(args.glove_columns)
+    feature_order = tuple(f.strip().lower() for f in args.feature_order.split(",") if f.strip())
+    if not feature_order:
+        raise ValueError("--feature-order cannot be empty")
+    _supported = {"mav", "mavs", "wl", "zc", "ssc", "rms"}
+    _unknown = set(feature_order) - _supported
+    if _unknown:
+        raise ValueError(f"unsupported features in --feature-order: {sorted(_unknown)}. Supported: {sorted(_supported)}")
     target_subject = args.target_subject.upper()
     if target_subject not in subjects:
         raise ValueError(f"target subject {target_subject} is not in --subjects")
@@ -840,7 +852,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         window_ms=args.window_ms,
         stride_ms=args.stride_ms,
         target_offset_samples=args.target_offset_samples,
-        feature_order=("mav", "mavs", "wl", "zc", "ssc"),
+        feature_order=feature_order,
         feature_normalization="mu_law",
         target_normalization="mu_law",
         mu_law_mu=args.mu_law_mu,
@@ -867,7 +879,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     print(f"  target subject : {target_subject}")
     print(f"  source subjects: {[subject for subject in subjects if subject != target_subject]}")
     print(f"  exercise/actions: {args.exercise} / {list(actions)}")
-    print(f"  glove columns  : {list(glove_columns)}")
+    print(f"  target mapping : {config.target_mapping} (output dim={len(GLOVE_COLUMN_INDICES) if config.target_mapping == 'glove_columns' else 5})")
     print(f"  feature/window : {config.feature_order}, {args.window_ms} ms, stride {args.stride_ms} ms")
     print(f"  normalization  : mu-law mu={args.mu_law_mu}")
 
@@ -922,7 +934,18 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         ckpt = torch.load(args.resume_pretrain, map_location=device, weights_only=False)
         ckpt_config = ckpt.get("config", {})
         input_dim = len(ckpt_config.get("feature_order", config.feature_order)) * 12
-        output_dim = 5
+        ckpt_mapping = ckpt_config.get("target_mapping", "doa5")
+        current_mapping = config.target_mapping
+        if ckpt_mapping != current_mapping:
+            raise ValueError(
+                f"Checkpoint was trained with target_mapping='{ckpt_mapping}' "
+                f"but current config uses target_mapping='{current_mapping}'. "
+                f"Use matching --target-mapping or re-pretrain."
+            )
+        if ckpt_mapping == "glove_columns":
+            output_dim = len(GLOVE_COLUMN_INDICES)
+        else:
+            output_dim = 5
         pretrain_model = build_cfc_regressor(
             input_dim=input_dim,
             output_dim=output_dim,
@@ -931,6 +954,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             cfc_dropout=ckpt_config.get("cfc_dropout", config.cfc_dropout),
         )
         pretrain_model.load_state_dict(ckpt["model_state_dict"])
+        pretrain_model = pretrain_model.to(device)
         pretrain_model.eval()
         pretrain = {
             "model": pretrain_model,
@@ -955,6 +979,12 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         batch_size=config.batch_size,
         device=device,
     )
+    # Post-hoc DoA metrics for glove_columns mode
+    if config.target_mapping == "glove_columns":
+        zero_shot["doa_metrics"] = _compute_doa_metrics_from_glove(
+            zero_shot["y_true"], zero_shot["y_pred"],
+            action_labels=normalized_query.action_labels,
+        )
     ft_train_split, ft_val_split = _split_sequence_split_temporal(
         normalized_support, train_fraction=0.8,
     )
@@ -996,6 +1026,8 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             "pretrain_best_epoch": make_jsonable(summarize_best_epoch(pretrain["history"])),
             "pretrain_history": make_jsonable(pretrain["history"]),
             "zero_shot_test_metrics": make_jsonable(zero_shot["metrics"]),
+            "zero_shot_per_action_metrics": make_jsonable(zero_shot.get("per_action_metrics", {})),
+            **({"zero_shot_doa_metrics": make_jsonable(zero_shot["doa_metrics"])} if "doa_metrics" in zero_shot else {}),
             "artifacts": {
                 "pretrain_checkpoint": str(pretrain_checkpoint),
             },
@@ -1020,7 +1052,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             early_stopping_patience=args.ft_early_stopping_patience,
             enable_atl=True,
             source_split=normalized_source,
-            dd_lr=1e-3,
+            dd_lr=1e-4,
             cfc_atl_lr=1e-4,
             atl_lambda_cap=args.atl_lambda_cap,
         )
@@ -1043,6 +1075,12 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         batch_size=config.batch_size,
         device=device,
     )
+    # Post-hoc DoA metrics for glove_columns mode
+    if config.target_mapping == "glove_columns":
+        adapted["doa_metrics"] = _compute_doa_metrics_from_glove(
+            adapted["y_true"], adapted["y_pred"],
+            action_labels=normalized_query.action_labels,
+        )
 
     checkpoint_dir = output_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -1085,10 +1123,12 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         "zero_shot_test_metrics": {
             "metrics": make_jsonable(zero_shot["metrics"]),
             "per_action_metrics": make_jsonable(zero_shot["per_action_metrics"]),
+            **({"doa_metrics": make_jsonable(zero_shot["doa_metrics"])} if "doa_metrics" in zero_shot else {}),
         },
         "adapted_test_metrics": {
             "metrics": make_jsonable(adapted["metrics"]),
             "per_action_metrics": make_jsonable(adapted["per_action_metrics"]),
+            **({"doa_metrics": make_jsonable(adapted["doa_metrics"])} if "doa_metrics" in adapted else {}),
         },
         "artifacts": {
             "pretrain_checkpoint": str(pretrain_checkpoint),

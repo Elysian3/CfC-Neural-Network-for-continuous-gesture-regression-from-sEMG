@@ -51,8 +51,8 @@ Thumbs.db
 TODO.md
 AGENTS.md
 CLAUDE.md
-
-reference files/Data_Sheet_1.PDF
-reference files/fnins-18-1306050.pdf
-reference files/DB8_glove.png
+reference files/
 .gitignore
+docs/
+api.md
+

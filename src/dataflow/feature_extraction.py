@@ -34,7 +34,9 @@ except ImportError:  # pragma: no cover - package-style fallback
 
 FEATURE_ORDER = ("mav", "mavs", "wl", "zc", "ssc")
 SUPPORTED_FEATURES = ("mav", "mavs", "wl", "zc", "ssc", "rms")
-DEFAULT_MU_LAW_MU = 255.0
+DEFAULT_MU_LAW_MU = 1_048_576.0  # 2^20
+DEFAULT_REST_PERCENTILE = 10.0
+DEFAULT_REST_THRESHOLD_SCALE = 1.0
 
 
 def _validate_windows(windows: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -64,31 +66,110 @@ def _validate_windows(windows: dict) -> tuple[np.ndarray, np.ndarray]:
     return unrectified, rectified
 
 
+def _compute_rest_thresholds(
+    filtered_emg: np.ndarray,
+    stimulus: np.ndarray | None = None,
+    rest_percentile: float = DEFAULT_REST_PERCENTILE,
+    fs: float = FS,
+    window_ms: float = WIN_MS,
+    stride_ms: float = STRIDE_MS,
+) -> np.ndarray:
+    """Compute per-channel ZC/SSC thresholds from rest-state EMG amplitude.
+
+    Primary path: when ``stimulus`` labels are available, use ``stimulus == 0``
+    frames to directly measure the per-channel rest RMS (noise floor).
+
+    Fallback path: when no labels exist or no rest frames are found, segment
+    the full filtered signal into pseudo-windows internally and take the
+    ``rest_percentile``-th percentile of per-segment RMS values.
+
+    Parameters
+    ----------
+    filtered_emg:
+        Bandpass-filtered EMG with shape ``(n_samples, n_channels)``.
+    stimulus:
+        Optional stimulus/restimulus label array.  ``0`` marks rest periods.
+    rest_percentile:
+        Percentile used in the fallback path (default 10th).
+    fs, window_ms, stride_ms:
+        Signal parameters used only in the fallback segmentation.
+
+    Returns
+    -------
+    np.ndarray
+        Per-channel threshold array with shape ``(n_channels,)``, dtype float32.
+    """
+    emg = np.asarray(filtered_emg, dtype=np.float32)
+    if emg.ndim != 2:
+        raise ValueError("filtered_emg must have shape (n_samples, n_channels)")
+    n_channels = emg.shape[1]
+
+    # ── Primary path: stimulus-guided rest measurement ──────────────────────
+    if stimulus is not None:
+        stim = np.asarray(stimulus).ravel()
+        if stim.shape[0] != emg.shape[0]:
+            raise ValueError(
+                f"stimulus length {stim.shape[0]} does not match "
+                f"EMG sample count {emg.shape[0]}"
+            )
+        rest_mask = stim == 0
+        if np.any(rest_mask):
+            rest_emg = emg[rest_mask]
+            return np.sqrt(
+                np.mean(np.square(rest_emg), axis=0, dtype=np.float64)
+            ).astype(np.float32)
+
+    # ── Fallback: percentile of internally-segmented RMS values ─────────────
+    window_size = int(round(fs * window_ms / 1000.0))
+    stride = int(round(fs * stride_ms / 1000.0))
+    if window_size <= 0 or stride <= 0:
+        raise ValueError(
+            "fallback window/stride resolved to zero samples; "
+            "check fs, window_ms, stride_ms"
+        )
+
+    n_samples = emg.shape[0]
+    if n_samples < window_size:
+        global_rms = np.sqrt(np.mean(np.square(emg), axis=0, dtype=np.float64))
+        return np.maximum(0.1 * global_rms, 1e-8).astype(np.float32)
+
+    n_segments = 1 + (n_samples - window_size) // stride
+    segment_rms = np.empty((n_segments, n_channels), dtype=np.float64)
+    for i in range(n_segments):
+        start = i * stride
+        seg = emg[start:start + window_size]
+        segment_rms[i] = np.sqrt(np.mean(np.square(seg), axis=0, dtype=np.float64))
+
+    rest_idx = max(1, int(n_segments * rest_percentile / 100.0))
+    sorted_rms = np.sort(segment_rms, axis=0)
+    rest_rms = np.mean(sorted_rms[:rest_idx], axis=0, dtype=np.float64)
+    return np.maximum(rest_rms, 1e-8).astype(np.float32)
+
+
 def _resolve_channel_thresholds(
     unrectified_windows: np.ndarray,
-    threshold: float | np.ndarray | None,
-    default_scale: float,
+    threshold: float | np.ndarray,
 ) -> np.ndarray:
-    """
-    Resolve one threshold per channel for ZC and SSC counting.
+    """Resolve one threshold per channel for ZC and SSC counting.
 
-    When no explicit threshold is provided, we scale each channel by its mean
-    absolute magnitude. This is still a heuristic, but it is now explicit and
-    easy to replace with a more principled calibration later.
+    The caller must provide an explicit threshold (scalar or per-channel
+    array).  Use :func:`_compute_rest_thresholds` upstream to obtain a
+    data-driven value, or pass through ``run_feature_pipeline`` which
+    handles this automatically.
     """
-    n_channels = unrectified_windows.shape[2]
-
     if threshold is None:
-        channel_scale = np.mean(np.abs(unrectified_windows), axis=(0, 1), dtype=np.float64)
-        resolved = default_scale * np.maximum(channel_scale, 1e-8)
-    else:
-        resolved = np.asarray(threshold, dtype=np.float32)
-        if resolved.ndim == 0:
-            resolved = np.full(n_channels, float(resolved), dtype=np.float32)
-        elif resolved.shape != (n_channels,):
-            raise ValueError(f"threshold must be scalar or shape ({n_channels},)")
-
-    return resolved.astype(np.float32, copy=False)
+        raise ValueError(
+            "threshold must not be None; use _compute_rest_thresholds() to obtain "
+            "a data-driven value, or go through run_feature_pipeline() for automatic "
+            "calibration"
+        )
+    n_channels = unrectified_windows.shape[2]
+    resolved = np.asarray(threshold, dtype=np.float32)
+    if resolved.ndim == 0:
+        resolved = np.full(n_channels, float(resolved), dtype=np.float32)
+    elif resolved.shape != (n_channels,):
+        raise ValueError(f"threshold must be scalar or shape ({n_channels},), got {resolved.shape}")
+    return resolved
 
 
 def mean_absolute_value(rectified_windows: np.ndarray) -> np.ndarray:
@@ -118,8 +199,7 @@ def root_mean_square(unrectified_windows: np.ndarray) -> np.ndarray:
 
 def zero_crossings(
     unrectified_windows: np.ndarray,
-    threshold: float | np.ndarray | None = None,
-    default_scale: float = 0.01,
+    threshold: float | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Count zero crossings per window and channel.
@@ -127,12 +207,11 @@ def zero_crossings(
     A crossing is counted only when the signal changes sign and the amplitude
     difference is larger than the channel threshold. This suppresses tiny noisy
     sign flips that carry little physiological meaning.
+
+    Use :func:`_compute_rest_thresholds` to obtain a data-driven threshold, or
+    go through :func:`run_feature_pipeline` which handles this automatically.
     """
-    channel_thresholds = _resolve_channel_thresholds(
-        unrectified_windows,
-        threshold=threshold,
-        default_scale=default_scale,
-    )
+    channel_thresholds = _resolve_channel_thresholds(unrectified_windows, threshold)
 
     left = unrectified_windows[:, :-1, :]
     right = unrectified_windows[:, 1:, :]
@@ -142,20 +221,18 @@ def zero_crossings(
 
 def slope_sign_changes(
     unrectified_windows: np.ndarray,
-    threshold: float | np.ndarray | None = None,
-    default_scale: float = 0.01,
+    threshold: float | np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Count slope sign changes per window and channel.
 
     SSC roughly counts local turning points. It is a cheap proxy for waveform
     shape complexity and often complements amplitude-based features.
+
+    Use :func:`_compute_rest_thresholds` to obtain a data-driven threshold, or
+    go through :func:`run_feature_pipeline` which handles this automatically.
     """
-    channel_thresholds = _resolve_channel_thresholds(
-        unrectified_windows,
-        threshold=threshold,
-        default_scale=default_scale,
-    )
+    channel_thresholds = _resolve_channel_thresholds(unrectified_windows, threshold)
 
     prev_samples = unrectified_windows[:, :-2, :]
     curr_samples = unrectified_windows[:, 1:-1, :]
@@ -177,10 +254,15 @@ def extract_emg_features(
     feature_order: Iterable[str] = FEATURE_ORDER,
     zc_threshold: float | np.ndarray | None = None,
     ssc_threshold: float | np.ndarray | None = None,
-    threshold_scale: float = 0.01,
 ) -> dict:
     """
     Extract window-level EMG features from one aligned window batch.
+
+    ZC and SSC features are only computed when they appear in ``feature_order``.
+    When they are needed, explicit ``zc_threshold`` and ``ssc_threshold`` must
+    be provided.  Use :func:`run_feature_pipeline` for automatic calibration,
+    or call :func:`_compute_rest_thresholds` directly when using this function
+    outside the full pipeline.
 
     The return value keeps both the per-feature tensors and one flattened matrix
     because different later stages may prefer different shapes.
@@ -194,20 +276,47 @@ def extract_emg_features(
     if not selected_feature_order:
         raise ValueError("feature_order cannot be empty")
 
+    need_zc = "zc" in selected_feature_order
+    need_ssc = "ssc" in selected_feature_order
+
+    if need_zc and zc_threshold is None:
+        raise ValueError(
+            "zc_threshold is required when 'zc' is in feature_order; "
+            "use run_feature_pipeline() for automatic calibration, or call "
+            "_compute_rest_thresholds() to obtain a data-driven value"
+        )
+    if need_ssc and ssc_threshold is None:
+        raise ValueError(
+            "ssc_threshold is required when 'ssc' is in feature_order; "
+            "use run_feature_pipeline() for automatic calibration, or call "
+            "_compute_rest_thresholds() to obtain a data-driven value"
+        )
+
     mav = mean_absolute_value(rectified)
     mavs = mean_absolute_value_slope(mav)
     wl = waveform_length(unrectified)
     rms = root_mean_square(unrectified)
-    zc, resolved_zc = zero_crossings(unrectified, threshold=zc_threshold, default_scale=threshold_scale)
-    ssc, resolved_ssc = slope_sign_changes(unrectified, threshold=ssc_threshold, default_scale=threshold_scale)
+
+    resolved_zc = None
+    resolved_ssc = None
+    zc = None
+    ssc = None
+
+    if need_zc:
+        zc, resolved_zc = zero_crossings(unrectified, zc_threshold)
+    if need_ssc:
+        ssc, resolved_ssc = slope_sign_changes(unrectified, ssc_threshold)
+
     feature_by_name = {
         "mav": mav,
         "mavs": mavs,
         "wl": wl,
-        "zc": zc.astype(np.float32),
-        "ssc": ssc.astype(np.float32),
         "rms": rms,
     }
+    if need_zc:
+        feature_by_name["zc"] = zc.astype(np.float32)
+    if need_ssc:
+        feature_by_name["ssc"] = ssc.astype(np.float32)
 
     # Tensor shape is (windows, channels, features). This is the most natural
     # representation for inspection because each channel keeps its feature block.
@@ -230,13 +339,11 @@ def extract_emg_features(
     if target_values is not None:
         target_values = np.asarray(target_values, dtype=np.float32)
 
-    return {
+    result = {
         "mav": mav,
         "mavs": mavs,
         "wl": wl,
         "rms": rms,
-        "zc": zc.astype(np.float32),
-        "ssc": ssc.astype(np.float32),
         "feature_order": list(selected_feature_order),
         "feature_tensor": feature_tensor,
         "feature_matrix": feature_matrix,
@@ -257,12 +364,17 @@ def extract_emg_features(
             if windows.get("target_alignment_indices") is None
             else np.asarray(windows["target_alignment_indices"], dtype=np.int32)
         ),
-        "target_mode": windows.get("target_mode"),
         "target_offset_samples": int(windows.get("target_offset_samples", 0)),
         "target_names": windows.get("target_names"),
-        "zc_thresholds": resolved_zc,
-        "ssc_thresholds": resolved_ssc,
     }
+    if need_zc:
+        result["zc"] = zc.astype(np.float32)
+        result["zc_thresholds"] = resolved_zc
+    if need_ssc:
+        result["ssc"] = ssc.astype(np.float32)
+        result["ssc_thresholds"] = resolved_ssc
+
+    return result
 
 
 def _resolve_target_columns(target_columns: int | Iterable[int] | None, n_targets: int) -> list[int]:
@@ -325,6 +437,9 @@ def _select_mapped_targets(
     if source_targets.ndim != 2:
         raise ValueError(f"{target_mapping_source} must be 2-D for target mapping")
     mapped_targets = apply_linear_doa_mapping(source_targets, mapping=target_mapping)
+    if target_mapping == "glove_columns":
+        from doa_mapping import GLOVE_COLUMN_INDICES, GLOVE_COLUMN_NAMES
+        return mapped_targets, list(GLOVE_COLUMN_INDICES), list(GLOVE_COLUMN_NAMES)
     return mapped_targets, list(range(source_targets.shape[1])), list(DOA5_NAMES)
 
 
@@ -338,15 +453,20 @@ def run_feature_pipeline(
     fs: float = FS,
     window_ms: int = WIN_MS,
     stride_ms: int = STRIDE_MS,
-    target_mode: str = "last",
     target_offset_samples: int = 0,
     feature_order: Iterable[str] = FEATURE_ORDER,
     zc_threshold: float | np.ndarray | None = None,
     ssc_threshold: float | np.ndarray | None = None,
-    threshold_scale: float = 0.01,
+    rest_percentile: float = DEFAULT_REST_PERCENTILE,
+    rest_threshold_scale: float = DEFAULT_REST_THRESHOLD_SCALE,
 ) -> dict:
     """
     Execute the full feature pipeline from one .mat file to aligned features.
+
+    ZC and SSC thresholds are automatically calibrated from rest-state EMG
+    amplitude when not explicitly provided.  Rest periods are identified via
+    stimulus/restimulus labels (``stimulus == 0``).  When labels are
+    unavailable, the pipeline falls back to a percentile-based estimate.
 
     The output keeps the raw data, filtered EMG, aligned windows, and features
     together so inspection and training code can share the same artifact.
@@ -368,13 +488,34 @@ def run_feature_pipeline(
         resolved_target_source = target_mapping
 
     filtered_emg = preprocess_emg(data["emg"], fs=fs)
+
+    # Auto-calibrate ZC/SSC thresholds from rest-state amplitude when not
+    # explicitly provided by the caller.
+    if zc_threshold is None or ssc_threshold is None:
+        # Prefer restimulus (re-labeled), fall back to stimulus
+        stim = data.get("restimulus")
+        if stim is None:
+            stim = data.get("stimulus")
+        auto_threshold = _compute_rest_thresholds(
+            filtered_emg,
+            stimulus=stim,
+            rest_percentile=rest_percentile,
+            fs=fs,
+            window_ms=window_ms,
+            stride_ms=stride_ms,
+        )
+        auto_threshold = auto_threshold * rest_threshold_scale
+        if zc_threshold is None:
+            zc_threshold = auto_threshold
+        if ssc_threshold is None:
+            ssc_threshold = auto_threshold
+
     windows = sliding_window(
         filtered_emg,
         selected_targets,
         fs=fs,
         window_ms=window_ms,
         stride_ms=stride_ms,
-        target_mode=target_mode,
         target_offset_samples=target_offset_samples,
         target_names=target_names,
         target_prefix=resolved_target_source,
@@ -384,7 +525,6 @@ def run_feature_pipeline(
         feature_order=feature_order,
         zc_threshold=zc_threshold,
         ssc_threshold=ssc_threshold,
-        threshold_scale=threshold_scale,
     )
 
     return {

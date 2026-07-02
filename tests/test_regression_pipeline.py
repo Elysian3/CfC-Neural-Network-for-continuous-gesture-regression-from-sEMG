@@ -13,15 +13,16 @@ if str(DATAFLOW_DIR) not in sys.path:
 
 from SwRectify import sliding_window
 from doa_mapping import DB8_OFFICIAL_W, DB8_TO_DB2_CHANNELS, DOA5_NAMES, DOA5_W, apply_linear_doa_mapping
-from feature_extraction import extract_emg_features, prepare_regression_data, run_feature_pipeline
+from feature_extraction import (
+    _compute_rest_thresholds,
+    extract_emg_features,
+    prepare_regression_data,
+    run_feature_pipeline,
+)
 
 
 class RegressionPipelineTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Small synthetic recording:
-        # - 10 samples
-        # - 2 EMG channels
-        # - one monotonic target and one scaled copy
         self.emg = np.arange(20, dtype=np.float32).reshape(10, 2)
         self.targets = np.column_stack(
             [
@@ -30,6 +31,8 @@ class RegressionPipelineTests(unittest.TestCase):
             ]
         )
 
+    # ── Window alignment tests ───────────────────────────────────────────────
+
     def test_last_sample_alignment(self) -> None:
         windows = sliding_window(
             self.emg,
@@ -37,7 +40,6 @@ class RegressionPipelineTests(unittest.TestCase):
             fs=10,
             window_ms=400,
             stride_ms=200,
-            target_mode="last",
             target_names=["angle_a", "angle_b"],
         )
 
@@ -58,50 +60,6 @@ class RegressionPipelineTests(unittest.TestCase):
             ),
         )
 
-    def test_center_and_mean_alignment(self) -> None:
-        center_windows = sliding_window(
-            self.emg,
-            self.targets,
-            fs=10,
-            window_ms=400,
-            stride_ms=200,
-            target_mode="center",
-        )
-        mean_windows = sliding_window(
-            self.emg,
-            self.targets,
-            fs=10,
-            window_ms=400,
-            stride_ms=200,
-            target_mode="mean",
-        )
-
-        np.testing.assert_array_equal(center_windows["target_alignment_indices"], np.array([1, 3, 5, 7]))
-        np.testing.assert_allclose(
-            center_windows["target_values"],
-            np.array(
-                [
-                    [1.0, 10.0],
-                    [3.0, 30.0],
-                    [5.0, 50.0],
-                    [7.0, 70.0],
-                ],
-                dtype=np.float32,
-            ),
-        )
-        np.testing.assert_allclose(
-            mean_windows["target_values"],
-            np.array(
-                [
-                    [1.5, 15.0],
-                    [3.5, 35.0],
-                    [5.5, 55.0],
-                    [7.5, 75.0],
-                ],
-                dtype=np.float32,
-            ),
-        )
-
     def test_positive_target_offset_drops_tail_windows(self) -> None:
         windows = sliding_window(
             self.emg,
@@ -109,7 +67,6 @@ class RegressionPipelineTests(unittest.TestCase):
             fs=10,
             window_ms=400,
             stride_ms=200,
-            target_mode="last",
             target_offset_samples=2,
             target_names=["angle_a", "angle_b"],
         )
@@ -131,6 +88,8 @@ class RegressionPipelineTests(unittest.TestCase):
             ),
         )
 
+    # ── Feature extraction and preparation tests ─────────────────────────────
+
     def test_feature_extraction_and_regression_preparation(self) -> None:
         windows = sliding_window(
             self.emg,
@@ -138,10 +97,13 @@ class RegressionPipelineTests(unittest.TestCase):
             fs=10,
             window_ms=400,
             stride_ms=200,
-            target_mode="last",
             target_names=["angle_a"],
         )
-        feature_set = extract_emg_features(windows)
+        feature_set = extract_emg_features(
+            windows,
+            zc_threshold=1e-8,
+            ssc_threshold=1e-8,
+        )
         regression = prepare_regression_data(feature_set, normalize=True)
 
         self.assertEqual(feature_set["feature_tensor"].shape, (4, 2, 5))
@@ -150,6 +112,8 @@ class RegressionPipelineTests(unittest.TestCase):
         self.assertEqual(regression["y"].shape, (4, 1))
         self.assertEqual(regression["target_names"], ["angle_a"])
         np.testing.assert_allclose(regression["x"].mean(axis=0), np.zeros(10), atol=1e-5)
+        np.testing.assert_allclose(feature_set["zc_thresholds"], np.full(2, 1e-8, dtype=np.float32))
+        np.testing.assert_allclose(feature_set["ssc_thresholds"], np.full(2, 1e-8, dtype=np.float32))
 
     def test_feature_extraction_can_emit_rms_only(self) -> None:
         windows = {
@@ -185,6 +149,10 @@ class RegressionPipelineTests(unittest.TestCase):
             feature_set["feature_matrix"],
             np.array([[np.sqrt(4.5), np.sqrt(8.0)], [1.0, 2.0]], dtype=np.float32),
         )
+        self.assertNotIn("zc", feature_set)
+        self.assertNotIn("ssc", feature_set)
+        self.assertNotIn("zc_thresholds", feature_set)
+        self.assertNotIn("ssc_thresholds", feature_set)
 
     def test_explicit_zc_ssc_thresholds_are_used(self) -> None:
         windows = sliding_window(
@@ -193,7 +161,6 @@ class RegressionPipelineTests(unittest.TestCase):
             fs=10,
             window_ms=400,
             stride_ms=200,
-            target_mode="last",
             target_names=["angle_a"],
         )
 
@@ -205,6 +172,8 @@ class RegressionPipelineTests(unittest.TestCase):
 
         np.testing.assert_allclose(feature_set["zc_thresholds"], np.full(2, 1e-8, dtype=np.float32))
         np.testing.assert_allclose(feature_set["ssc_thresholds"], np.full(2, 1e-8, dtype=np.float32))
+
+    # ── DoA mapping tests ────────────────────────────────────────────────────
 
     def test_doa5_mapping_has_expected_shape_and_names(self) -> None:
         self.assertEqual(DOA5_W.shape, (5, 22))
@@ -268,13 +237,91 @@ class RegressionPipelineTests(unittest.TestCase):
             fs=10,
             window_ms=400,
             stride_ms=200,
-            target_mode="last",
         )
 
         self.assertEqual(pipeline["target_source"], "doa5")
         self.assertEqual(pipeline["target_mapping"], "doa5")
         self.assertEqual(pipeline["target_names"], list(DOA5_NAMES))
         self.assertEqual(pipeline["feature_set"]["target_values"].shape[1], 5)
+
+    # ── Rest-state threshold calibration tests ───────────────────────────────
+
+    def test_stimulus_based_rest_threshold(self) -> None:
+        rng = np.random.default_rng(42)
+        n_samples = 1000
+        n_channels = 4
+
+        emg = np.zeros((n_samples, n_channels), dtype=np.float32)
+        emg[:400] = rng.normal(0, 2e-6, (400, n_channels)).astype(np.float32)
+        emg[400:800] = rng.normal(0, 5e-5, (400, n_channels)).astype(np.float32)
+        emg[800:] = rng.normal(0, 1e-6, (200, n_channels)).astype(np.float32)
+
+        stimulus = np.zeros(n_samples, dtype=np.float32)
+        stimulus[400:800] = 1
+
+        thresholds = _compute_rest_thresholds(emg, stimulus=stimulus, fs=2000.0)
+        rest_emg = np.concatenate([emg[:400], emg[800:]], axis=0)
+        expected = np.sqrt(np.mean(np.square(rest_emg), axis=0))
+
+        self.assertEqual(thresholds.shape, (n_channels,))
+        np.testing.assert_allclose(thresholds, expected, rtol=0.15)
+
+    def test_percentile_fallback_when_no_stimulus(self) -> None:
+        rng = np.random.default_rng(123)
+        n_samples = 2000
+        n_channels = 3
+
+        emg = rng.normal(0, 1e-6, (n_samples, n_channels)).astype(np.float32)
+        emg[500:700] = rng.normal(0, 1e-4, (200, n_channels)).astype(np.float32)
+        emg[1200:1400] = rng.normal(0, 8e-5, (200, n_channels)).astype(np.float32)
+
+        thresholds = _compute_rest_thresholds(emg, stimulus=None, fs=2000.0)
+
+        self.assertEqual(thresholds.shape, (n_channels,))
+        self.assertTrue(np.all(thresholds < 5e-6),
+                        f"thresholds {thresholds} should be near noise floor, not active level")
+
+    def test_restimulus_preferred_over_stimulus(self) -> None:
+        n_samples = 200
+        n_channels = 2
+        emg = np.random.default_rng(7).normal(0, 3e-6, (n_samples, n_channels)).astype(np.float32)
+
+        restimulus = np.ones(n_samples, dtype=np.float32)
+        restimulus[50:150] = 0
+
+        stimulus = np.zeros(n_samples, dtype=np.float32)
+
+        threshold_from_restimulus = _compute_rest_thresholds(emg, stimulus=restimulus)
+        threshold_from_stimulus = _compute_rest_thresholds(emg, stimulus=stimulus)
+
+        self.assertFalse(
+            np.allclose(threshold_from_restimulus, threshold_from_stimulus, rtol=0.01),
+            "restimulus and stimulus should produce different thresholds when masks differ",
+        )
+
+    def test_zc_ssc_skipped_when_not_in_feature_order(self) -> None:
+        windows = {
+            "unrectified": np.random.default_rng(1).normal(0, 1e-6, (3, 10, 2)).astype(np.float32),
+            "rectified": np.abs(np.random.default_rng(1).normal(0, 1e-6, (3, 10, 2)).astype(np.float32)),
+            "window_start_indices": np.array([0, 1, 2], dtype=np.int32),
+            "window_end_indices": np.array([10, 11, 12], dtype=np.int32),
+            "window_center_indices": np.array([5, 6, 7], dtype=np.int32),
+            "window_size": 10,
+            "stride": 1,
+            "window_ms": 200,
+            "stride_ms": 50,
+            "fs": 2000.0,
+        }
+
+        feature_set = extract_emg_features(windows, feature_order=("rms", "mav", "wl"))
+
+        self.assertNotIn("zc", feature_set)
+        self.assertNotIn("ssc", feature_set)
+        self.assertNotIn("zc_thresholds", feature_set)
+        self.assertNotIn("ssc_thresholds", feature_set)
+        self.assertIn("mav", feature_set)
+        self.assertIn("wl", feature_set)
+        self.assertIn("rms", feature_set)
 
 
 if __name__ == "__main__":

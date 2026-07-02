@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 matplotlib.use("Agg")
@@ -15,7 +17,6 @@ import torch
 import torch.nn as nn
 import torch.utils.data as data
 from ncps.torch import CfC
-from ncps.wirings import AutoNCP
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -36,7 +37,6 @@ from feature_extraction import (
 
 DEFAULT_TARGET_COLUMN = 10
 DEFAULT_TARGET_OFFSET_SAMPLES = 200
-DEFAULT_ZC_SSC_THRESHOLD = 1e-8
 
 
 @dataclass(frozen=True)
@@ -65,11 +65,9 @@ class CfCTrainingConfig:
     window_ms: float = WIN_MS
     stride_ms: float = STRIDE_MS
     feature_order: tuple[str, ...] = ("mav", "mavs", "wl", "zc", "ssc")
-    target_mode: str = "last"   
     target_offset_samples: int = DEFAULT_TARGET_OFFSET_SAMPLES
-    zc_threshold: float | None = DEFAULT_ZC_SSC_THRESHOLD
-    ssc_threshold: float | None = DEFAULT_ZC_SSC_THRESHOLD
-    zc_ssc_threshold_scale: float = 0.01
+    zc_threshold: float | None = None
+    ssc_threshold: float | None = None
     feature_normalization: str = "mu_law"
     target_normalization: str = "mu_law"
     mu_law_mu: float = DEFAULT_MU_LAW_MU
@@ -80,7 +78,7 @@ class CfCTrainingConfig:
     seq_len: int = 8
     seq_stride: int = 1
     hidden_units: int = 64
-    model_family: str = "autoncp"
+    model_family: str = "dense_cfc_linear"
     cfc_dropout: float = 0.0
     batch_size: int = 128
     learning_rate: float = 1e-3
@@ -115,11 +113,9 @@ def build_best_cfc_config(**overrides) -> CfCTrainingConfig:
         "window_ms": WIN_MS,
         "stride_ms": STRIDE_MS,
         "feature_order": ("mav", "mavs", "wl", "zc", "ssc"),
-        "target_mode": "last",
         "target_offset_samples": DEFAULT_TARGET_OFFSET_SAMPLES,
-        "zc_threshold": DEFAULT_ZC_SSC_THRESHOLD,
-        "ssc_threshold": DEFAULT_ZC_SSC_THRESHOLD,
-        "zc_ssc_threshold_scale": 0.01,    # need to be fixed
+        "zc_threshold": None,
+        "ssc_threshold": None,
         "feature_normalization": "mu_law",
         "target_normalization": "mu_law",
         "mu_law_mu": DEFAULT_MU_LAW_MU,
@@ -248,26 +244,6 @@ class DomainDiscriminator(nn.Module):
         return self.net(x)
 
 
-class CfCRegressor(nn.Module):
-    """
-    Small many-to-one CfC regressor.
-
-    The CfC layer emits an output at every timestep. For this project we only
-    keep the final timestep because each input sequence is meant to predict the
-    angle aligned with the last window in that sequence.
-    """
-
-    def __init__(self, input_dim: int, output_dim: int, hidden_units: int) -> None:
-        super().__init__()
-        self.model_family = "autoncp"
-        wiring = AutoNCP(hidden_units, output_dim)
-        self.cfc = CfC(input_dim, wiring, batch_first=True)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y_sequence, _ = self.cfc(x)
-        return y_sequence[:, -1, :]
-
-
 class DenseCfCLinearRegressor(nn.Module):
     """Dense CfC encoder with an explicit linear DoA readout head."""
 
@@ -313,11 +289,9 @@ def build_cfc_regressor(
     input_dim: int,
     output_dim: int,
     hidden_units: int,
-    model_family: str = "autoncp",
+    model_family: str = "dense_cfc_linear",
     cfc_dropout: float = 0.0,
 ) -> nn.Module:
-    if model_family == "autoncp":
-        return CfCRegressor(input_dim=input_dim, output_dim=output_dim, hidden_units=hidden_units)
     if model_family == "dense_cfc_linear":
         return DenseCfCLinearRegressor(
             input_dim=input_dim,
@@ -466,11 +440,9 @@ def load_recording_features(file_path: Path, config: CfCTrainingConfig) -> Recor
         window_ms=config.window_ms,
         stride_ms=config.stride_ms,
         feature_order=config.feature_order,
-        target_mode=config.target_mode,
         target_offset_samples=config.target_offset_samples,
         zc_threshold=config.zc_threshold,
         ssc_threshold=config.ssc_threshold,
-        threshold_scale=config.zc_ssc_threshold_scale,
     )
     feature_set = pipeline["feature_set"]
     data = pipeline["data"]
@@ -1423,6 +1395,60 @@ def main() -> None:
     plt.close(results["prediction_figure"])
     print(f"\nSaved prediction plot to: {output_path}")
     return results
+
+
+def subject_sort_key(subject_id: str) -> tuple[int, str]:
+    """Sort subject ids numerically instead of lexicographically."""
+    digits = "".join(character for character in subject_id if character.isdigit())
+    if not digits:
+        raise ValueError(f"subject id '{subject_id}' does not contain a numeric suffix")
+    return int(digits), subject_id
+
+
+def discover_target_files(db2_dir: Path, target_source: str) -> dict[str, list[str]]:
+    """Group usable DB2 recordings by subject id."""
+    grouped: dict[str, list[str]] = {}
+    for file_path in list_db2_files(db2_dir):
+        if not file_contains_target(file_path, target_source):
+            continue
+        subject_id = file_path.stem.split("_")[0]
+        grouped.setdefault(subject_id, []).append(file_path.name)
+
+    sorted_subjects = sorted(grouped, key=subject_sort_key)
+    return {
+        subject_id: sorted(grouped[subject_id])
+        for subject_id in sorted_subjects
+    }
+
+
+def make_jsonable(value: Any) -> Any:
+    """Convert common numeric and path types into JSON-safe values."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(key): make_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [make_jsonable(item) for item in value]
+    return value
+
+
+def summarize_best_epoch(history: list[dict[str, float]]) -> dict[str, float]:
+    """Extract the validation-best checkpoint record from the pretraining history."""
+    if not history:
+        raise ValueError("history is empty")
+    return min(history, key=lambda entry: entry["val_mae"])
+
+
+def save_summary(output_dir: Path, summary: dict[str, Any]) -> Path:
+    """Persist the experiment summary as JSON."""
+    summary_path = output_dir / "summary.json"
+    with summary_path.open("w", encoding="utf-8") as handle:
+        json.dump(make_jsonable(summary), handle, indent=2)
+    return summary_path
 
 
 if __name__ == "__main__":
