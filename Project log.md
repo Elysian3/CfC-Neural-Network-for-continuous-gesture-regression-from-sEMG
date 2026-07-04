@@ -126,7 +126,22 @@ tests/
 
 We completed a comprehensive diagnosis of the ATL (Adversarial Transfer Learning) protocol and designed a modification plan. Three independent scientist agents analyzed different axes of the problem. All three converged on the same root cause and fixes — zero contradictions.
 
-### What We Know
+> **STATUS (2026-07-02): This section (lines 129-236) was written 2026-06-10, BEFORE the experimental falsification on 2026-06-12.**
+> 
+> **What changed:** A controlled λ_cap sweep (0.25-1.0) on S1 showed the OPPOSITE of what was predicted — lower λ_cap gives strictly better R², and DD naturally wins (95%+) when the system is well-tuned. The hypothesis "DD winning = adversarial game broken" was **falsified**. DD accuracy is NOT a meaningful diagnostic.
+> 
+> **Per-change status:**
+> - Change 1 (Equalize LRs): ✅ Implemented. dd_lr = cfc_atl_lr = 1e-4. Works correctly.
+> - Change 2 (Normalize λ schedule): ❌ Not implemented. `epoch/10` still hardcoded.
+> - Change 3 (Reduce DD capacity): ❌ Not implemented. Unnecessary — DD winning at 128 hidden is fine.
+> - Change 4 (Increase λ_cap to 1.0): ❌ **WRONG.** Increasing λ_cap degrades R² (0.25→0.3: R² 0.687→0.641; 0.25→1.0: R² 0.687→0.561). The adversarial signal should be a WEAK auxiliary, not a co-equal partner.
+> - Changes 5-7 (Closed-loop control): ❌ Not implemented. Premise (DD should be at 50%) is wrong.
+> 
+> **What remains valid:** The λ schedule hardcoding issue (Change 2) is still worth fixing. The architectural analysis (GRL mechanism, DD architecture, λ schedule formula) is accurate as documentation.
+> 
+> ---
+> 
+> ### What We Know (Historical — June 2026, pre-falsification)
 
 **The ATL adversarial game is structurally broken.** The Domain Discriminator (DD) wins trivially, achieving 95%+ accuracy at distinguishing source vs target features. When the DD wins, domain adaptation is not happening — features remain domain-specific, and cross-subject transfer fails for hard actions (index_flexion, middle_flexion).
 
@@ -180,13 +195,13 @@ Combined: `cfc_lr × λ_cap = 1e-4 × 0.3 = 3e-5` vs `dd_lr = 1e-3` → effectiv
 | 6 | **Composite early stopping (DACS)** | `score = val_MAE + 0.1 × |DD_acc_mean - 0.5|` |
 | 7 | **Active pre-mortem interventions** | Auto: increase λ, decay DD LR, escalate dropout |
 
-### Predicted Outcomes After Fix
+### Predicted Outcomes After Fix (FALSIFIED — June 2026)
 
 ```
-Current:  DD accuracy 95-98% → adversarial game broken
-After #1-4: DD accuracy 50-70% → healthy equilibrium, domain confusion working
-After #5-7: DD accuracy 50-60% → stabilised by closed-loop control
-Target metric: DD accuracy ~50% = perfect domain confusion = features are subject-invariant
+Predicted:      DD accuracy 50-70% → healthy equilibrium, domain confusion working
+Actual (sweep): DD accuracy 95%+ at ALL λ levels; lower λ gives BETTER R²
+Target metric "DD accuracy ~50%" is NOT a valid goal — DD naturally wins at low λ.
+The adversarial signal should be a WEAK auxiliary objective, not a co-equal partner.
 ```
 
 ### Files Involved
@@ -205,15 +220,16 @@ After implementing changes 1-4, run on one subject (S1) and check:
 3. Domain loss — should not collapse to near-zero
 4. Per-action R² — index_flexion and middle_flexion should show improvement
 
-### What The Next Session Should Do
+### What Actually Happened (June-July 2026)
 
-1. **Implement changes 1-4** (minimum viable fix — low risk, high impact)
-2. **Run a single-subject validation** (S1, 30 epoch ATL) and verify DD accuracy drops
-3. **If DD accuracy is 50-70%**: Run full 7-subject comparison against baseline
-4. **If DD accuracy still 90%+**: Implement changes 5-7 (adaptive control)
-5. **Sweep λ_cap** over [0.5, 0.7, 1.0] with equalized LRs to find optimal
-6. **Update docs/ARCHITECTURE.md** with new hyperparameters and results
-7. **Update known issues** section — verify which issues are resolved
+1. **Change 1 implemented** (equalize LRs): ✅ dd_lr = cfc_atl_lr = 1e-4. Works.
+2. **λ_cap sweep executed**: 0.25 → R² 0.687; 0.3 → 0.641; 0.5 → 0.637; 0.75 → 0.467; 1.0 → 0.561. **Lower is better.** The plan's recommendation to increase λ_cap was wrong.
+3. **DD accuracy stayed at 95%+ at ALL λ levels** — this is normal behavior, not a problem.
+4. **Changes 2-7 not implemented** — Change 3 (reduce DD) and Changes 5-7 (closed-loop control) are unnecessary given the falsification. Change 2 (λ schedule parameterization) remains worthwhile.
+5. **ZC/SSC rest-state calibration** (unplanned but high-impact): Replaced dead threshold, all 5 DoAs positive R² for the first time. S1 R² = 0.658.
+6. **μ=255 correction** (unplanned): Fixed PDF extraction artifact. μ=2^20 caused training divergence.
+7. **Codebase cleanup**: 8 files → 2 in src/deep learning/. AutoNCP removed.
+8. **docs/ARCHITECTURE.md updated** with current values (July 2026).
 
 ### Key Code Locations (Quick Reference)
 

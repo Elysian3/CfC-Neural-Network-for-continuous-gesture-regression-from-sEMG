@@ -17,7 +17,6 @@ import torch.nn as nn
 
 from train import (
     DomainDiscriminator,
-    GradientReversalFunction,
     SequenceSplit,
     build_best_cfc_config,
     build_cfc_regressor,
@@ -91,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--window-ms", type=float, default=200.0)
     parser.add_argument("--stride-ms", type=float, default=50.0)
-    parser.add_argument("--mu-law-mu", type=float, default=1_048_576.0)  # 2^20
+    parser.add_argument("--mu-law-mu", type=float, default=255.0)  # G.711 standard
     parser.add_argument("--hidden-units", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-epochs", type=int, default=400)
@@ -124,8 +123,8 @@ def parse_args() -> argparse.Namespace:
         help="Probability of augmentation per batch. 1.0 = always, 0.0 = never",
     )
     parser.add_argument("--enable-atl", action="store_true", default=False)
-    parser.add_argument("--atl-lambda-cap", type=float, default=0.25,
-                        help="Maximum lambda for GRL gradient scaling in ATL (0.2-0.3 recommended; higher values destabilize regression)")
+    parser.add_argument("--atl-subject-weight", type=float, default=1.0,
+                        help="Target regression weight w in L_subject = w * MSE(pred_t, target_y) (Eq 1.11)")
     parser.add_argument("--skip-fine-tune", action="store_true", default=False,
                         help="Pretrain only, skip fine-tuning (saves pretrain checkpoint)")
     parser.add_argument("--resume-pretrain", type=Path, default=None,
@@ -468,113 +467,107 @@ def freeze_for_linear_head(model: nn.Module) -> dict[str, Any]:
     }
 
 
-def _compute_dann_lambda(epoch_index: float) -> float:
-    """Progressive lambda schedule for DANN domain loss weighting.
-
-    Grows from ~0 toward 1.0, crossing 0.5 at epoch 5. Aggressive schedule
-    suited for short ATL runs (10-30 epochs) where early domain pressure is
-    needed before early stopping triggers.
-    """
-    return min(1.0, 2.0 / (1.0 + np.exp(-10.0 * (epoch_index / 10.0 - 0.5))))
-
-
 def _atl_training_epoch(
-    adapted: nn.Module,
+    *,
+    source_model: nn.Module,
+    target_model: nn.Module,
     dd: nn.Module,
-    source_loader: data.DataLoader,
-    target_loader: data.DataLoader,
-    cfc_optimizer: torch.optim.Optimizer,
+    source_loader: Any,
+    target_loader: Any,
+    target_optimizer: torch.optim.Optimizer,
     dd_optimizer: torch.optim.Optimizer,
     loss_fn: nn.Module,
-    bce_fn: nn.Module,
-    lambda_val: float,
-    *,
+    subject_weight: float,
     device: torch.device,
     gradient_clip_norm: float | None,
 ) -> dict[str, float]:
-    """Run one ATL epoch with combined regression + domain-adversarial loss."""
-    adapted.train()
+    """One epoch of GAN-style ATL (Lin & He 2024, Section 3.3).
+
+    Multi-s-net (frozen, eval) produces F_s as a fixed feature reference.
+    New-t-net (trainable) produces F_t + predictions.
+    DD distinguishes F_s vs F_t; New-t-net tries to fool DD.
+
+    Two optimizer steps per batch — standard GAN generator/discriminator
+    alternating training.  F_t is recomputed in step 2 because step 1's
+    backward consumes the autograd graph.
+    """
+    source_model.eval()
+    target_model.train()
     dd.train()
 
     source_iter = iter(source_loader)
-    total_mse = 0.0
-    total_domain = 0.0
-    n_source_correct = 0
-    n_target_correct = 0
-    n_source_total = 0
-    n_target_total = 0
-    total_batches = 0
-    total_examples = 0
+    total_L_DD = 0.0
+    total_L_mapping = 0.0
+    total_L_subject = 0.0
+    n_src_total = 0
+    n_tgt_total = 0
+    n_src_correct = 0
+    n_tgt_correct = 0
+    n_batches = 0
 
     for target_x, target_y in target_loader:
-        target_x = target_x.to(device)
-        target_y = target_y.to(device)
-
         try:
-            source_x, source_y = next(source_iter)
+            source_x, _source_y = next(source_iter)
         except StopIteration:
             source_iter = iter(source_loader)
-            source_x, source_y = next(source_iter)
+            source_x, _source_y = next(source_iter)
 
         source_x = source_x.to(device)
-        source_y = source_y.to(device)
+        target_x = target_x.to(device)
+        target_y = target_y.to(device)
 
         n_src = source_x.shape[0]
         n_tgt = target_x.shape[0]
 
-        combined_x = torch.cat([source_x, target_x], dim=0)
-        combined_y = torch.cat([source_y, target_y], dim=0)
+        # Multi-s-net: frozen, deterministic
+        with torch.no_grad():
+            _, F_s = source_model.forward_with_features(source_x)
 
-        cfc_optimizer.zero_grad(set_to_none=True)
-        dd_optimizer.zero_grad(set_to_none=True)
+        # ---- Step 1: Train DD ----
+        pred_t, F_t = target_model.forward_with_features(target_x)
 
-        pred, features = adapted.forward_with_features(combined_x)
-
-        # Regression loss on all labelled data
-        mse_loss = loss_fn(pred, combined_y)
-
-        # Domain-adversarial loss via GRL
-        src_feat = features[:n_src]
-        tgt_feat = features[n_src:]
-
-        src_rev = GradientReversalFunction.apply(src_feat, lambda_val)
-        tgt_rev = GradientReversalFunction.apply(tgt_feat, lambda_val)
-
-        src_domain_pred = dd(src_rev)
-        tgt_domain_pred = dd(tgt_rev)
-
-        src_domain_loss = bce_fn(src_domain_pred, torch.zeros(n_src, 1, device=device))
-        tgt_domain_loss = bce_fn(tgt_domain_pred, torch.ones(n_tgt, 1, device=device))
-        domain_loss = src_domain_loss + tgt_domain_loss
-
-        total_loss = mse_loss + lambda_val * domain_loss
-        total_loss.backward()
-
+        dd_optimizer.zero_grad()
+        dd_src = dd(F_s)
+        dd_tgt = dd(F_t)
+        eps = 1e-8
+        L_DD = -(torch.log(dd_src + eps).mean()
+                 + torch.log(1.0 - dd_tgt + eps).mean())
+        L_DD.backward()
         if gradient_clip_norm is not None:
-            nn.utils.clip_grad_norm_(adapted.parameters(), gradient_clip_norm)
-
-        cfc_optimizer.step()
+            nn.utils.clip_grad_norm_(dd.parameters(), gradient_clip_norm)
         dd_optimizer.step()
 
-        batch_total = n_src + n_tgt
-        total_mse += float(mse_loss.item()) * batch_total
-        total_domain += float(domain_loss.item())
-        total_examples += batch_total
-        total_batches += 1
+        # ---- Step 2: Train New-t-net ----
+        # Recompute F_t: step 1's backward freed the graph
+        pred_t, F_t = target_model.forward_with_features(target_x)
 
-        # Track DD accuracy for diagnostics
+        target_optimizer.zero_grad()
+        L_mapping = -torch.log(dd(F_t) + eps).mean()
+        L_subject = subject_weight * loss_fn(pred_t, target_y)
+        (L_mapping + L_subject).backward()
+        if gradient_clip_norm is not None:
+            nn.utils.clip_grad_norm_(target_model.parameters(), gradient_clip_norm)
+        target_optimizer.step()
+
+        # ---- Metrics ----
+        n_batches += 1
+        total_L_DD += float(L_DD.item())
+        total_L_mapping += float(L_mapping.item())
+        total_L_subject += float(L_subject.item())
+        n_src_total += n_src
+        n_tgt_total += n_tgt
         with torch.no_grad():
-            n_source_correct += int(((src_domain_pred.cpu() < 0.5).float().sum().item()))
-            n_target_correct += int(((tgt_domain_pred.cpu() > 0.5).float().sum().item()))
-            n_source_total += n_src
-            n_target_total += n_tgt
+            n_src_correct += int((dd_src < 0.5).float().sum().item())
+            n_tgt_correct += int((dd_tgt > 0.5).float().sum().item())
 
     return {
-        "mse": total_mse / max(total_examples, 1),
-        "domain_loss": total_domain / max(total_batches, 1),
-        "dd_source_acc": n_source_correct / max(n_source_total, 1),
-        "dd_target_acc": n_target_correct / max(n_target_total, 1),
+        "L_DD": total_L_DD / max(n_batches, 1),
+        "L_mapping": total_L_mapping / max(n_batches, 1),
+        "L_subject": total_L_subject / max(n_batches, 1),
+        "dd_source_acc": n_src_correct / max(n_src_total, 1),
+        "dd_target_acc": n_tgt_correct / max(n_tgt_total, 1),
     }
+
 
 
 def fine_tune_head(
@@ -591,38 +584,44 @@ def fine_tune_head(
     # ATL (adversarial transfer learning) parameters
     enable_atl: bool = False,
     source_split: SequenceSplit | None = None,
-    dd_lr: float = 1e-3,
+    dd_lr: float = 1e-4,
     cfc_atl_lr: float = 1e-4,
-    atl_lambda_cap: float = 1.0,
+    atl_subject_weight: float = 1.0,
 ) -> tuple[nn.Module, list[dict[str, float]], dict[str, Any]]:
-    adapted = copy.deepcopy(model).to(device)
 
-    # ---- ATL (Domain-Adversarial) branch ----
+    # ---- ATL (GAN-style, Lin & He 2024 Section 3.3) ----
     if enable_atl:
         if source_split is None:
             raise ValueError("source_split is required when enable_atl=True")
-        if not hasattr(adapted, "forward_with_features"):
+        if not hasattr(model, "forward_with_features"):
             raise ValueError(
                 "ATL requires a model with forward_with_features(); "
                 "use model_family='dense_cfc_linear'"
             )
 
-        # Unfreeze CfC body for domain-adversarial fine-tuning
-        for param in adapted.parameters():
-            param.requires_grad = True
+        # Multi-s-net: frozen source feature reference
+        source_model = copy.deepcopy(model).to(device)
+        for param in source_model.parameters():
+            param.requires_grad = False
+        source_model.eval()
 
-        audit: dict[str, Any] = {
-            "mode": "atl_domain_adaptation",
-            "trainable_param_count": sum(p.numel() for p in adapted.parameters()),
-            "total_param_count": sum(p.numel() for p in adapted.parameters()),
-            "trainable_fraction": 1.0,
-        }
+        # New-t-net: trainable, warm-start from pretrained weights
+        target_model = copy.deepcopy(model).to(device)
+        target_model.train()
 
         dd = DomainDiscriminator(in_dim=config.hidden_units, hidden=128).to(device)
-        audit["dd_param_count"] = sum(p.numel() for p in dd.parameters())
 
-        cfc_optimizer = torch.optim.AdamW(
-            adapted.parameters(),
+        audit: dict[str, Any] = {
+            "mode": "atl_gan",
+            "trainable_param_count": sum(p.numel() for p in target_model.parameters()),
+            "total_param_count": sum(p.numel() for p in target_model.parameters()),
+            "trainable_fraction": 1.0,
+            "dd_param_count": sum(p.numel() for p in dd.parameters()),
+            "subject_weight": atl_subject_weight,
+        }
+
+        target_optimizer = torch.optim.AdamW(
+            target_model.parameters(),
             lr=cfc_atl_lr,
             weight_decay=config.weight_decay,
         )
@@ -633,57 +632,54 @@ def fine_tune_head(
         )
 
         loss_fn = nn.MSELoss()
-        bce_fn = nn.BCELoss()
 
         source_loader = make_train_loader(source_split, config)
         target_loader = make_train_loader(support_split, config)
 
         history: list[dict[str, float]] = []
-        best_state = copy.deepcopy(adapted.state_dict())
+        best_state = copy.deepcopy(target_model.state_dict())
         best_val_mae = float("inf")
         patience_counter = 0
 
         for epoch in range(1, epochs + 1):
-            lambda_val = _compute_dann_lambda(float(epoch)) * atl_lambda_cap
-
             train_metrics = _atl_training_epoch(
-                adapted,
-                dd,
-                source_loader,
-                target_loader,
-                cfc_optimizer,
-                dd_optimizer,
-                loss_fn,
-                bce_fn,
-                lambda_val,
+                source_model=source_model,
+                target_model=target_model,
+                dd=dd,
+                source_loader=source_loader,
+                target_loader=target_loader,
+                target_optimizer=target_optimizer,
+                dd_optimizer=dd_optimizer,
+                loss_fn=loss_fn,
+                subject_weight=atl_subject_weight,
                 device=device,
                 gradient_clip_norm=config.gradient_clip_norm,
             )
 
             entry: dict[str, float] = {
                 "epoch": float(epoch),
-                "train_loss": float(train_metrics["mse"]),
-                "domain_loss": float(train_metrics["domain_loss"]),
-                "lambda": float(lambda_val),
+                "L_DD": float(train_metrics["L_DD"]),
+                "L_mapping": float(train_metrics["L_mapping"]),
+                "L_subject": float(train_metrics["L_subject"]),
                 "dd_source_acc": float(train_metrics["dd_source_acc"]),
                 "dd_target_acc": float(train_metrics["dd_target_acc"]),
             }
 
             print(
                 f"  ATL epoch {epoch:3d} | "
-                f"MSE={train_metrics['mse']:.5f} | "
-                f"domain={train_metrics['domain_loss']:.5f} | "
-                f"lambda={lambda_val:.4f} | "
+                f"DD={train_metrics['L_DD']:.4f} | "
+                f"Map={train_metrics['L_mapping']:.4f} | "
+                f"Reg={train_metrics['L_subject']:.4f} | "
                 f"DD src={train_metrics['dd_source_acc']:.3f} "
                 f"tgt={train_metrics['dd_target_acc']:.3f}",
                 flush=True,
             )
 
-            # Validation: MSE-only (no domain loss)
+            # Validation
             if val_split is not None and val_split.x.shape[0] > 0:
-                adapted.eval()
+                target_model.eval()
                 val_eval = evaluate_split(
-                    adapted,
+                    target_model,
                     val_split,
                     target_stats=y_stats,
                     batch_size=config.batch_size,
@@ -691,12 +687,13 @@ def fine_tune_head(
                 )
                 val_mae = float(val_eval["metrics"]["mae_mean"])
                 entry["val_mae"] = val_mae
+                target_model.train()
 
-                print(f"         val MSE={val_mae:.5f}", flush=True)
+                print(f"         val MAE={val_mae:.5f}", flush=True)
 
                 if val_mae < best_val_mae:
                     best_val_mae = val_mae
-                    best_state = copy.deepcopy(adapted.state_dict())
+                    best_state = copy.deepcopy(target_model.state_dict())
                     patience_counter = 0
                 else:
                     patience_counter += 1
@@ -705,15 +702,16 @@ def fine_tune_head(
                         history.append(entry)
                         break
             else:
-                best_state = copy.deepcopy(adapted.state_dict())
+                best_state = copy.deepcopy(target_model.state_dict())
 
             history.append(entry)
 
-        adapted.load_state_dict(best_state)
-        return adapted, history, audit
+        target_model.load_state_dict(best_state)
+        return target_model, history, audit
 
     # ---- Standard (non-ATL) branch ----
     # DenseCfCLinearRegressor has a .head that can be isolated for head-only FT.
+    adapted = copy.deepcopy(model).to(device)
     audit = freeze_for_linear_head(adapted)
     loader = make_train_loader(support_split, config)
     optimizer = torch.optim.AdamW(
@@ -1054,7 +1052,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             source_split=normalized_source,
             dd_lr=1e-4,
             cfc_atl_lr=1e-4,
-            atl_lambda_cap=args.atl_lambda_cap,
+            atl_subject_weight=args.atl_subject_weight,
         )
     else:
         adapted_model, ft_history, audit = fine_tune_head(

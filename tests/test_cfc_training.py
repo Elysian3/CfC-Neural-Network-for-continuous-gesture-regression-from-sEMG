@@ -1,3 +1,4 @@
+import copy
 import pathlib
 import sys
 import unittest
@@ -14,7 +15,6 @@ if str(TRAINING_DIR) not in sys.path:
 from train import (
     DenseCfCLinearRegressor,
     DomainDiscriminator,
-    GradientReversalFunction,
     build_cfc_regressor,
     RecordingFeatures,
     SequenceSplit,
@@ -259,28 +259,7 @@ class CfCTrainingHelpersTests(unittest.TestCase):
             self.assertIsNotNone(split.action_labels)
             np.testing.assert_array_equal(np.unique(split.action_labels), np.array([1, 2], dtype=np.int16))
 
-    # ── GRL / DD / ATL ──────────────────────────────────────────────────────
-
-    def test_grl_backwards_sign(self) -> None:
-        x = torch.randn(4, 8, requires_grad=True)
-        lambda_val = 0.5
-
-        y = GradientReversalFunction.apply(x, lambda_val)
-        loss = y.sum()
-        loss.backward()
-
-        self.assertIsNotNone(x.grad)
-        torch.testing.assert_close(
-            x.grad,
-            -lambda_val * torch.ones_like(x),
-            msg="GRL backward should multiply gradient by -lambda",
-        )
-
-    def test_grl_preserves_forward_output(self) -> None:
-        x = torch.randn(3, 5)
-        lambda_val = 0.3
-        y = GradientReversalFunction.apply(x, lambda_val)
-        torch.testing.assert_close(y, x, msg="GRL forward must be identity")
+    # ── DD / GAN ATL ────────────────────────────────────────────────────────
 
     def test_dd_construction(self) -> None:
         batch_size = 16
@@ -320,6 +299,7 @@ class CfCTrainingHelpersTests(unittest.TestCase):
         )
 
     def test_atl_smoke(self) -> None:
+        """GAN-style ATL: frozen source model + trainable target model + DD."""
         n_source = 10
         n_target = 5
         input_dim = 60
@@ -332,62 +312,75 @@ class CfCTrainingHelpersTests(unittest.TestCase):
         target_x = torch.randn(n_target, seq_len, input_dim)
         target_y = torch.randn(n_target, output_dim)
 
-        model = DenseCfCLinearRegressor(input_dim, output_dim, hidden_units, dropout=0.1)
-        model.train()
+        pretrained = DenseCfCLinearRegressor(input_dim, output_dim, hidden_units, dropout=0.1)
+
+        # Multi-s-net: frozen
+        source_model = copy.deepcopy(pretrained)
+        for p in source_model.parameters():
+            p.requires_grad = False
+        source_model.eval()
+
+        # New-t-net: trainable, warm-start
+        target_model = copy.deepcopy(pretrained)
+        target_model.train()
 
         dd = DomainDiscriminator(in_dim=hidden_units, hidden=128)
+        dd.train()
 
-        cfc_optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-        dd_optimizer = torch.optim.AdamW(dd.parameters(), lr=1e-3)
+        target_opt = torch.optim.AdamW(target_model.parameters(), lr=1e-4)
+        dd_opt = torch.optim.AdamW(dd.parameters(), lr=1e-4)
 
         loss_fn = torch.nn.MSELoss()
-        bce_fn = torch.nn.BCELoss()
+        subject_weight = 1.0
 
-        lambda_val = 0.5
+        # Record initial weights to verify frozen source
+        source_params_before = [p.clone().detach() for p in source_model.parameters()]
 
-        combined_x = torch.cat([source_x, target_x], dim=0)
-        combined_y = torch.cat([source_y, target_y], dim=0)
+        # --- One batch of GAN training ---
+        # Step 1: Train DD
+        with torch.no_grad():
+            _, F_s = source_model.forward_with_features(source_x)
 
-        cfc_optimizer.zero_grad(set_to_none=True)
-        dd_optimizer.zero_grad(set_to_none=True)
+        pred_t, F_t = target_model.forward_with_features(target_x)
 
-        pred, features = model.forward_with_features(combined_x)
+        dd_opt.zero_grad()
+        dd_src = dd(F_s)
+        dd_tgt = dd(F_t)
+        eps = 1e-8
+        L_DD = -(torch.log(dd_src + eps).mean() + torch.log(1.0 - dd_tgt + eps).mean())
+        L_DD.backward()
+        dd_opt.step()
 
-        mse_loss = loss_fn(pred, combined_y)
+        # Step 2: Train New-t-net — fresh forward
+        pred_t, F_t = target_model.forward_with_features(target_x)
 
-        n_src = source_x.shape[0]
-        src_feat = features[:n_src]
-        tgt_feat = features[n_src:]
+        target_opt.zero_grad()
+        L_mapping = -torch.log(dd(F_t) + eps).mean()
+        L_subject = subject_weight * loss_fn(pred_t, target_y)
+        (L_mapping + L_subject).backward()
+        target_opt.step()
 
-        src_rev = GradientReversalFunction.apply(src_feat, lambda_val)
-        tgt_rev = GradientReversalFunction.apply(tgt_feat, lambda_val)
+        # --- Assertions ---
+        # Source model must be unchanged
+        for before, after in zip(source_params_before, source_model.parameters()):
+            torch.testing.assert_close(after, before,
+                msg="Multi-s-net weights must not change (frozen)")
 
-        src_domain_pred = dd(src_rev)
-        tgt_domain_pred = dd(tgt_rev)
+        # Losses must be finite
+        self.assertTrue(torch.isfinite(L_DD).all(), msg="L_DD must be finite")
+        self.assertTrue(torch.isfinite(L_mapping).all(), msg="L_mapping must be finite")
+        self.assertTrue(torch.isfinite(L_subject).all(), msg="L_subject must be finite")
 
-        src_domain_loss = bce_fn(src_domain_pred, torch.zeros(n_src, 1))
-        tgt_domain_loss = bce_fn(tgt_domain_pred, torch.ones(n_target, 1))
-        domain_loss = src_domain_loss + tgt_domain_loss
+        # Target model must have gradients
+        target_grads = [p.grad for p in target_model.parameters()
+                        if p.requires_grad and p.grad is not None]
+        self.assertGreater(len(target_grads), 0,
+            msg="New-t-net must have non-None gradients")
 
-        total_loss = mse_loss + lambda_val * domain_loss
-        total_loss.backward()
-
-        cfc_optimizer.step()
-        dd_optimizer.step()
-
-        self.assertTrue(torch.isfinite(mse_loss).all(), msg="MSE loss should be finite")
-        self.assertTrue(torch.isfinite(domain_loss).all(), msg="Domain loss should be finite")
-        self.assertTrue(torch.isfinite(total_loss).all(), msg="Total loss should be finite")
-
-        model_grads = [p.grad for p in model.parameters() if p.requires_grad and p.grad is not None]
-        self.assertGreater(len(model_grads), 0, msg="CfC model should have non-None gradients")
-        self.assertTrue(
-            any(torch.isfinite(g).all() and torch.any(g != 0.0) for g in model_grads),
-            msg="At least one CfC parameter should have non-zero finite gradient",
-        )
-
+        # DD must have gradients
         dd_grads = [p.grad for p in dd.parameters() if p.grad is not None]
-        self.assertGreater(len(dd_grads), 0, msg="DD should have non-None gradients")
+        self.assertGreater(len(dd_grads), 0,
+            msg="DD must have non-None gradients")
 
 
 if __name__ == "__main__":

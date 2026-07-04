@@ -214,21 +214,8 @@ class WeightedSmoothL1Loss(nn.Module):
         return (per_target * self.target_weights).mean()
 
 
-class GradientReversalFunction(torch.autograd.Function):
-    """Reverse the gradient during backward pass for adversarial domain adaptation."""
-
-    @staticmethod
-    def forward(ctx, x, lambda_):
-        ctx.lambda_ = lambda_
-        return x
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return -ctx.lambda_ * grad_output, None
-
-
 class DomainDiscriminator(nn.Module):
-    """Binary domain classifier for GRL-based domain adaptation."""
+    """Binary domain classifier for GAN-based adversarial domain adaptation."""
 
     def __init__(self, in_dim=128, hidden=128):
         super().__init__()
