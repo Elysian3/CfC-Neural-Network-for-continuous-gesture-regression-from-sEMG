@@ -1,0 +1,2 @@
+dependencies:
+  esp-dsp: ">=1.4.0"

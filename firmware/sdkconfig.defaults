@@ -1,0 +1,24 @@
+# Antikythera ESP32-S3 SDK defaults
+# Target chip
+CONFIG_IDF_TARGET_ESP32S3=y
+
+# CPU: 240 MHz for DSP biquad performance
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# FreeRTOS: 1000 Hz tick for 1ms DSP timer precision
+CONFIG_FREERTOS_HZ=1000
+
+# Disable task WDT during development (DSP/CfC tasks use portMAX_DELAY)
+CONFIG_ESP_TASK_WDT_EN=n
+
+# ESP-DSP optimisations
+CONFIG_ESP_DSP_USE_ESP32S3=y
+
+# Compiler: optimise for performance (DSP inner loops)
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Main task stack: 8 KB (default 3.5 KB is tight)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Flash size: auto-detect (most S3 Zero boards are 4MB+)
+CONFIG_ESPTOOLPY_FLASHSIZE_DETECT=y

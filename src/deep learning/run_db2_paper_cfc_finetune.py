@@ -50,10 +50,28 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "log" / "db2_paper_cfc_finetune"
 
-PAPER_SUBJECTS = ("S1", "S3", "S5", "S13", "S14", "S15", "S21", "S22", "S27", "S30")
 PAPER_GLOVE_COLUMNS = (1, 2, 4, 5, 7, 8, 11, 12, 15, 16)
-PAPER_ACTIONS = (18, 19, 20, 21, 22, 23)
 PAPER_FEATURE_ORDER = ("rms",)
+ALL_EXERCISES = ("E1", "E2")  # E3 has no glove data for any subject
+
+
+def _discover_subjects(db2_dir: Path) -> list[str]:
+    """Return sorted list of all subject IDs found under ``db2_dir``."""
+    subjects: list[str] = []
+    for entry in sorted(db2_dir.iterdir()):
+        if entry.is_dir() and entry.name.upper().startswith("DB2_S"):
+            sid = entry.name.replace("DB2_", "", 1).replace("db2_", "", 1).upper()
+            subjects.append(sid)
+    return sorted(subjects, key=lambda s: (int(s[1:]) if s[1:].isdigit() else 0, s))
+
+
+def _resolve_actions(data_actions: set[int], requested: tuple[int, ...] | None) -> tuple[int, ...]:
+    """If ``requested`` is empty or the special sentinel (-1,), return all
+    non-rest actions found in ``data_actions``.  Otherwise return the
+    requested actions unchanged."""
+    if not requested or requested == (-1,):
+        return tuple(sorted(a for a in data_actions if a > 0))
+    return requested
 
 
 def parse_csv_ints(value: str) -> tuple[int, ...]:
@@ -79,9 +97,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--db2-dir", type=Path, default=REPO_ROOT / "src" / "data" / "DB2")
     parser.add_argument("--target-subject", type=str, default="S1")
-    parser.add_argument("--subjects", type=str, default=",".join(PAPER_SUBJECTS))
-    parser.add_argument("--exercise", type=str, default="E2")
-    parser.add_argument("--actions", type=str, default=",".join(str(value) for value in PAPER_ACTIONS))
+    parser.add_argument("--subjects", type=str, default="all",
+                        help="'all' to auto-discover, or comma-separated subject IDs")
+    parser.add_argument("--exercise", type=str, default="all",
+                        help="'all' for E1+E2+E3, or comma-separated (e.g. E1,E2)")
+    parser.add_argument("--actions", type=str, default="all",
+                        help="'all' to use every non-rest action, or comma-separated integers")
     parser.add_argument(
         "--glove-columns",
         type=str,
@@ -143,102 +164,95 @@ def load_subject_exercise_split(subject: str, exercise: str, config) -> Sequence
 
 def load_subject_filtered_split(
     subject: str,
-    exercise: str,
+    exercises: tuple[str, ...],
     config,
     *,
     actions: tuple[int, ...],
 ) -> SequenceSplit:
     available_files = {path.name: path for path in list_db2_files(config.db2_dir)}
-    file_name = f"{subject}_{exercise}_A1.mat"
-    if file_name not in available_files:
-        raise FileNotFoundError(f"missing DB2 file for paper protocol: {file_name}")
-    file_path = available_files[file_name]
-    data = load_data(str(file_path))
-    if "glove" not in data:
-        raise KeyError(f"{file_name} does not contain CyberGlove data")
-
-    emg = np.asarray(data["emg"], dtype=np.float32)
-    glove = np.asarray(data["glove"], dtype=np.float32)
-    restimulus = np.asarray(data["restimulus"]).reshape(-1)
-    rerepetition = np.asarray(data["rerepetition"]).reshape(-1)
-    n_samples = min(emg.shape[0], glove.shape[0], restimulus.shape[0], rerepetition.shape[0])
-    emg = emg[:n_samples]
-    glove = glove[:n_samples]
-    restimulus = restimulus[:n_samples]
-    rerepetition = rerepetition[:n_samples]
-
-    # Preprocess the entire recording once — zero-phase filtering needs the full
-    # temporal context to avoid edge artifacts that would appear if we filtered
-    # each short action segment independently.
-    emg_filtered = preprocess_emg(emg, fs=2000.0)
-
-    # Compute rest-state thresholds once per recording, reused for all action
-    # segments.  Prefer restimulus over stimulus (matching train.py convention).
-    rest_threshold = _compute_rest_thresholds(
-        emg_filtered,
-        stimulus=restimulus,
-        fs=2000.0,
-        window_ms=config.window_ms,
-        stride_ms=config.stride_ms,
-    )
-
-    selected_recordings = []
     target_columns = list(config.target_columns) if config.target_columns else []
     mapping = config.target_mapping
 
-    for action in actions:
-        for repetition in range(1, 7):
-            indices = np.flatnonzero((restimulus == action) & (rerepetition == repetition))
-            if indices.size == 0:
-                continue
-            start = int(indices[0])
-            end = int(indices[-1]) + 1
+    all_selected_recordings = []
 
-            # Resolve targets: either apply 5-DoA mapping or use raw glove columns
-            if mapping is not None:
-                segment_targets = apply_linear_doa_mapping(glove[start:end], mapping=mapping)
-                if mapping == GLOVE_COLUMNS_MAPPING_NAME:
-                    target_names = list(GLOVE_COLUMN_NAMES)
+    for exercise in exercises:
+        file_name = f"{subject}_{exercise}_A1.mat"
+        if file_name not in available_files:
+            continue  # skip missing exercises quietly
+        file_path = available_files[file_name]
+        data = load_data(str(file_path))
+        if "glove" not in data:
+            continue
+
+        emg = np.asarray(data["emg"], dtype=np.float32)
+        glove = np.asarray(data["glove"], dtype=np.float32)
+        restimulus = np.asarray(data["restimulus"]).reshape(-1)
+        rerepetition = np.asarray(data["rerepetition"]).reshape(-1)
+        n_samples = min(emg.shape[0], glove.shape[0], restimulus.shape[0], rerepetition.shape[0])
+        emg = emg[:n_samples]
+        glove = glove[:n_samples]
+        restimulus = restimulus[:n_samples]
+        rerepetition = rerepetition[:n_samples]
+
+        emg_filtered = preprocess_emg(emg, fs=2000.0)
+
+        rest_threshold = _compute_rest_thresholds(
+            emg_filtered,
+            stimulus=restimulus,
+            fs=2000.0,
+            window_ms=config.window_ms,
+            stride_ms=config.stride_ms,
+        )
+
+        for action in actions:
+            for repetition in range(1, 7):
+                indices = np.flatnonzero((restimulus == action) & (rerepetition == repetition))
+                if indices.size == 0:
+                    continue
+                start = int(indices[0])
+                end = int(indices[-1]) + 1
+
+                if mapping is not None:
+                    segment_targets = apply_linear_doa_mapping(glove[start:end], mapping=mapping)
+                    if mapping == GLOVE_COLUMNS_MAPPING_NAME:
+                        target_names = list(GLOVE_COLUMN_NAMES)
+                    else:
+                        target_names = list(DOA5_NAMES)
                 else:
-                    target_names = list(DOA5_NAMES)
-            else:
-                segment_targets = glove[start:end, target_columns]
-                target_names = [f"glove_{column + 1}" for column in target_columns]
+                    segment_targets = glove[start:end, target_columns]
+                    target_names = [f"glove_{column + 1}" for column in target_columns]
 
-            windows = sliding_window(
-                emg_filtered[start:end],
-                segment_targets,
-                fs=2000.0,
-                window_ms=config.window_ms,
-                stride_ms=config.stride_ms,
-                target_offset_samples=config.target_offset_samples,
-                target_names=target_names,
-                target_prefix="glove",
-            )
-            feature_set = extract_emg_features(
-                windows,
-                feature_order=config.feature_order,
-                zc_threshold=rest_threshold,
-                ssc_threshold=rest_threshold,
-            )
-            selected_recordings.append(
-                type("RecordingLike", (), {})()
-            )
-            selected_recordings[-1].recording_id = f"{file_name}:A{action}:R{repetition}"
-            selected_recordings[-1].x_windows = np.asarray(feature_set["feature_matrix"], dtype=np.float32)
-            selected_recordings[-1].y_windows = np.asarray(feature_set["target_values"], dtype=np.float32)
-            selected_recordings[-1].target_alignment_indices = np.asarray(
-                feature_set["target_alignment_indices"],
-                dtype=np.int32,
-            )
-            selected_recordings[-1].feature_names = list(feature_set["channel_feature_names"])
-            selected_recordings[-1].target_names = list(feature_set["target_names"] or [])
-            selected_recordings[-1].fs = float(feature_set["fs"])
-            selected_recordings[-1].action_labels = np.full(feature_set["n_windows"], action, dtype=np.int16)
-            selected_recordings[-1].repetition_labels = np.full(feature_set["n_windows"], repetition, dtype=np.int16)
-    if not selected_recordings:
-        raise ValueError(f"{file_name} has no selected action/repetition windows")
-    return build_sequence_split(selected_recordings, seq_len=config.seq_len, seq_stride=config.seq_stride)
+                windows = sliding_window(
+                    emg_filtered[start:end],
+                    segment_targets,
+                    fs=2000.0,
+                    window_ms=config.window_ms,
+                    stride_ms=config.stride_ms,
+                    target_offset_samples=config.target_offset_samples,
+                    target_names=target_names,
+                    target_prefix="glove",
+                )
+                feature_set = extract_emg_features(
+                    windows,
+                    feature_order=config.feature_order,
+                    zc_threshold=rest_threshold,
+                    ssc_threshold=rest_threshold,
+                )
+                rec = type("RecordingLike", (), {})()
+                rec.recording_id = f"{file_name}:A{action}:R{repetition}"
+                rec.x_windows = np.asarray(feature_set["feature_matrix"], dtype=np.float32)
+                rec.y_windows = np.asarray(feature_set["target_values"], dtype=np.float32)
+                rec.target_alignment_indices = np.asarray(feature_set["target_alignment_indices"], dtype=np.int32)
+                rec.feature_names = list(feature_set["channel_feature_names"])
+                rec.target_names = list(feature_set["target_names"] or [])
+                rec.fs = float(feature_set["fs"])
+                rec.action_labels = np.full(feature_set["n_windows"], action, dtype=np.int16)
+                rec.repetition_labels = np.full(feature_set["n_windows"], repetition, dtype=np.int16)
+                all_selected_recordings.append(rec)
+
+    if not all_selected_recordings:
+        raise ValueError(f"subject {subject}: no action/repetition windows across exercises {exercises}")
+    return build_sequence_split(all_selected_recordings, seq_len=config.seq_len, seq_stride=config.seq_stride)
 
 
 def select_repetition_split(
@@ -828,7 +842,39 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     subjects = parse_csv_subjects(args.subjects)
-    actions = parse_csv_ints(args.actions)
+    if not subjects or subjects[0].upper() == "ALL":
+        subjects = _discover_subjects(args.db2_dir)
+        if not subjects:
+            raise ValueError(f"no DB2 subject directories found under {args.db2_dir}")
+
+    exercise_raw = tuple(e.strip().upper() for e in args.exercise.split(",") if e.strip())
+    if not exercise_raw or exercise_raw[0] == "ALL":
+        exercises = ALL_EXERCISES
+    else:
+        exercises = exercise_raw
+
+    target_subject = args.target_subject.upper()
+    if target_subject not in subjects:
+        raise ValueError(f"target subject {target_subject} is not in --subjects: {subjects}")
+
+    # Resolve actions: when "all" is requested, peek at every exercise file
+    # of the first subject to enumerate every non-rest action label.  Only
+    # exercises that contain CyberGlove data are considered.
+    if args.actions.strip().lower() == "all":
+        _peek_subj = subjects[0]
+        _all_actions: set[int] = set()
+        for _peek_ex in exercises:
+            _peek_path = args.db2_dir / f"DB2_{_peek_subj.lower()}" / f"{_peek_subj}_{_peek_ex}_A1.mat"
+            if not _peek_path.is_file():
+                continue
+            _peek_data = load_data(str(_peek_path))
+            if "glove" not in _peek_data:
+                continue
+            _all_actions.update(int(a) for a in _peek_data["restimulus"].flatten() if int(a) > 0)
+        actions = tuple(sorted(_all_actions))
+    else:
+        actions = parse_csv_ints(args.actions)
+
     glove_columns = parse_csv_ints(args.glove_columns)
     feature_order = tuple(f.strip().lower() for f in args.feature_order.split(",") if f.strip())
     if not feature_order:
@@ -837,9 +883,6 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     _unknown = set(feature_order) - _supported
     if _unknown:
         raise ValueError(f"unsupported features in --feature-order: {sorted(_unknown)}. Supported: {sorted(_supported)}")
-    target_subject = args.target_subject.upper()
-    if target_subject not in subjects:
-        raise ValueError(f"target subject {target_subject} is not in --subjects")
 
     config = build_best_cfc_config(
         db2_dir=args.db2_dir,
@@ -889,7 +932,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
 
     for i, subject in enumerate(subjects, 1):
         print(f"  [{i}/{len(subjects)}] loading {subject}...", end="", flush=True)
-        split = load_subject_filtered_split(subject, args.exercise, config, actions=actions)
+        split = load_subject_filtered_split(subject, exercises, config, actions=actions)
         print(f" {split.x.shape[0]} seq", flush=True)
         train_split, test_split, plan = select_repetition_split(
             split,

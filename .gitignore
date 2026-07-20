@@ -56,3 +56,9 @@ reference files/
 docs/
 api.md
 
+# ── ESP-IDF firmware build artefacts ────────────────────────────────────────
+firmware/managed_components/
+firmware/dependencies.lock
+firmware/sdkconfig
+firmware/sdkconfig.old
+
