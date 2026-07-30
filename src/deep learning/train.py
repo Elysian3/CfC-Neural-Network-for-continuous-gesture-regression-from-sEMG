@@ -40,6 +40,7 @@ from feature_extraction import (
 
 DEFAULT_TARGET_COLUMN = 10
 DEFAULT_TARGET_OFFSET_SAMPLES = 200
+DEFAULT_DB2_EMG_CHANNELS = tuple(range(1, 13))
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class CfCTrainingConfig:
     """
 
     db2_dir: Path = REPO_ROOT / "src" / "data" / "DB2"
+    emg_channels: tuple[int, ...] = DEFAULT_DB2_EMG_CHANNELS
     split_strategy: str = "blocked_time"  #The mode of split of data: recor ding -> file-level; blocked_time -> continguous time block 
     train_files: tuple[str, ...] = ()
     val_files: tuple[str, ...] = ()
@@ -107,6 +109,7 @@ def build_best_cfc_config(**overrides) -> CfCTrainingConfig:
 
     config_values = {
         "db2_dir": REPO_ROOT / "src" / "data" / "DB2",
+        "emg_channels": DEFAULT_DB2_EMG_CHANNELS,
         "split_strategy": "blocked_time",
         "target_source": "glove",
         "target_columns": (DEFAULT_TARGET_COLUMN,),

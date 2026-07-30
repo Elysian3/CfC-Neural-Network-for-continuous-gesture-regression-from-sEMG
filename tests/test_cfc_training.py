@@ -4,6 +4,8 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import warnings
+from dataclasses import asdict
 from unittest.mock import patch
 
 import numpy as np
@@ -53,9 +55,195 @@ class CfCTrainingHelpersTests(unittest.TestCase):
             args = paper_protocol.parse_args()
 
         self.assertEqual(args.feature_order, "rms")
+        self.assertEqual(args.emg_channels, "1,2,3,4,5,6,7,8,9,10,11,12")
         self.assertEqual(DEFAULT_MU_LAW_MU, 255.0)
         self.assertEqual(args.mu_law_mu, DEFAULT_MU_LAW_MU)
         self.assertEqual(build_best_cfc_config().mu_law_mu, DEFAULT_MU_LAW_MU)
+
+    def test_parse_emg_channels_accepts_one_based_physical_channels(self) -> None:
+        channels = paper_protocol.parse_emg_channels("1,2,3,4,5,6,7,8")
+
+        self.assertEqual(channels, (1, 2, 3, 4, 5, 6, 7, 8))
+
+    def test_parse_emg_channels_rejects_invalid_lists(self) -> None:
+        invalid_values = ("", ",", "1,,2", "1,1", "0,1", "-1,2", "1,13", "one,2")
+
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    paper_protocol.parse_emg_channels(value)
+
+    def test_emg_channels_are_selected_before_preprocessing(self) -> None:
+        raw_emg = np.arange(40 * 12, dtype=np.float32).reshape(40, 12)
+        synthetic_data = {
+            "emg": raw_emg,
+            "glove": np.zeros((40, 22), dtype=np.float32),
+            "restimulus": np.ones(40, dtype=np.int16),
+            "rerepetition": np.ones(40, dtype=np.int16),
+        }
+        config = build_best_cfc_config(
+            db2_dir=pathlib.Path("synthetic-db2"),
+            emg_channels=(1, 3, 8),
+            feature_order=("rms",),
+        )
+
+        with (
+            patch.object(paper_protocol, "list_db2_files", return_value=[pathlib.Path("S1_E1_A1.mat")]),
+            patch.object(paper_protocol, "load_data", return_value=synthetic_data),
+            patch.object(
+                paper_protocol,
+                "preprocess_emg",
+                side_effect=RuntimeError("stop after channel-selection boundary"),
+            ) as preprocess,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "channel-selection boundary"):
+                paper_protocol.load_subject_filtered_split(
+                    "S1",
+                    ("E1",),
+                    config,
+                    actions=(1,),
+                )
+
+        expected = raw_emg[:, [0, 2, 7]]  # physical channels 1, 3, 8 -> zero-based columns 0, 2, 7
+        np.testing.assert_array_equal(preprocess.call_args.args[0], expected)
+
+    def test_emg_channel_selection_rejects_recording_width_mismatch(self) -> None:
+        raw_emg = np.zeros((20, 8), dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "channel 9"):
+            paper_protocol.select_emg_channels(
+                raw_emg,
+                (1, 9),
+                recording_id="S1_E1_A1.mat",
+            )
+
+    def test_recording_feature_names_keep_physical_channel_numbers(self) -> None:
+        raw_emg = np.arange(40 * 12, dtype=np.float32).reshape(40, 12)
+        synthetic_data = {
+            "emg": raw_emg,
+            "glove": np.zeros((40, 22), dtype=np.float32),
+            "restimulus": np.ones(40, dtype=np.int16),
+            "rerepetition": np.ones(40, dtype=np.int16),
+        }
+        config = build_best_cfc_config(
+            db2_dir=pathlib.Path("synthetic-db2"),
+            emg_channels=(1, 3, 8),
+            feature_order=("rms", "zc"),
+            seq_len=1,
+        )
+        feature_set = {
+            "feature_matrix": np.zeros((1, 6), dtype=np.float32),
+            "target_values": np.zeros((1, 5), dtype=np.float32),
+            "target_alignment_indices": np.array([20], dtype=np.int32),
+            "channel_feature_names": [
+                "ch1_rms", "ch1_zc", "ch2_rms", "ch2_zc", "ch3_rms", "ch3_zc",
+            ],
+            "target_names": list(paper_protocol.DOA5_NAMES),
+            "fs": 2000.0,
+            "n_windows": 1,
+        }
+
+        with (
+            patch.object(paper_protocol, "list_db2_files", return_value=[pathlib.Path("S1_E1_A1.mat")]),
+            patch.object(paper_protocol, "load_data", return_value=synthetic_data),
+            patch.object(paper_protocol, "preprocess_emg", side_effect=lambda emg, fs: emg),
+            patch.object(
+                paper_protocol,
+                "_compute_rest_thresholds",
+                return_value=np.zeros(3, dtype=np.float32),
+            ),
+            patch.object(paper_protocol, "sliding_window", return_value={"synthetic": True}),
+            patch.object(paper_protocol, "extract_emg_features", return_value=feature_set),
+            patch.object(
+                paper_protocol,
+                "build_sequence_split",
+                side_effect=lambda recordings, seq_len, seq_stride: recordings[0],
+            ),
+        ):
+            recording = paper_protocol.load_subject_filtered_split(
+                "S1",
+                ("E1",),
+                config,
+                actions=(1,),
+            )
+
+        self.assertEqual(
+            recording.feature_names,
+            ["ch1_rms", "ch1_zc", "ch3_rms", "ch3_zc", "ch8_rms", "ch8_zc"],
+        )
+
+    def test_training_config_serializes_selected_emg_channels(self) -> None:
+        config = build_best_cfc_config(emg_channels=(1, 2, 3, 4, 5, 6, 7, 8))
+
+        self.assertEqual(config.emg_channels, (1, 2, 3, 4, 5, 6, 7, 8))
+        self.assertEqual(asdict(config)["emg_channels"], (1, 2, 3, 4, 5, 6, 7, 8))
+
+    def test_resume_input_dim_comes_from_checkpoint_channels_and_features(self) -> None:
+        config = build_best_cfc_config(
+            emg_channels=(1, 2, 3, 4, 5, 6, 7, 8),
+            feature_order=("rms", "zc"),
+        )
+        checkpoint_config = {
+            "emg_channels": [1, 2, 3, 4, 5, 6, 7, 8],
+            "feature_order": ["rms", "zc"],
+        }
+
+        input_dim = paper_protocol.resolve_resume_input_dim(
+            checkpoint_config,
+            config,
+            actual_input_dim=16,
+        )
+
+        self.assertEqual(input_dim, 16)  # 8 selected channels * 2 features
+
+    def test_resume_rejects_different_channel_selection(self) -> None:
+        config = build_best_cfc_config(
+            emg_channels=(1, 2, 3, 4, 5, 6, 7, 8),
+            feature_order=("rms", "zc"),
+        )
+        checkpoint_config = {
+            "emg_channels": [1, 2, 3, 4, 5, 6, 7, 9],
+            "feature_order": ["rms", "zc"],
+        }
+
+        with self.assertRaisesRegex(ValueError, "EMG channels"):
+            paper_protocol.resolve_resume_input_dim(
+                checkpoint_config,
+                config,
+                actual_input_dim=16,
+            )
+
+    def test_legacy_resume_is_explicitly_all_twelve_channels(self) -> None:
+        config = build_best_cfc_config(
+            emg_channels=tuple(range(1, 13)),
+            feature_order=("rms",),
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            input_dim = paper_protocol.resolve_resume_input_dim(
+                {"feature_order": ["rms"]},
+                config,
+                actual_input_dim=12,
+            )
+
+        self.assertEqual(input_dim, 12)
+        self.assertTrue(any("legacy checkpoint" in str(item.message).lower() for item in caught))
+
+    def test_legacy_resume_rejects_current_eight_channel_selection(self) -> None:
+        config = build_best_cfc_config(
+            emg_channels=(1, 2, 3, 4, 5, 6, 7, 8),
+            feature_order=("rms",),
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with self.assertRaisesRegex(ValueError, "EMG channels"):
+                paper_protocol.resolve_resume_input_dim(
+                    {"feature_order": ["rms"]},
+                    config,
+                    actual_input_dim=8,
+                )
 
     def test_train_module_is_library_only(self) -> None:
         self.assertFalse(hasattr(training_module, "main"))
@@ -246,18 +434,25 @@ class CfCTrainingHelpersTests(unittest.TestCase):
     def test_feature_normalization_stats_are_saved_for_header_export(self) -> None:
         stats = {
             "method": "mu_law",
-            "center": np.array([1.0, 2.0], dtype=np.float32),
-            "scale": np.array([3.0, 4.0], dtype=np.float32),
+            "center": np.arange(1.0, 7.0, dtype=np.float32),
+            "scale": np.arange(11.0, 17.0, dtype=np.float32),
             "mu": 255.0,
         }
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            path = save_feature_normalization_stats(pathlib.Path(tmp_dir), stats)
+            path = save_feature_normalization_stats(
+                pathlib.Path(tmp_dir),
+                stats,
+                emg_channels=(1, 3, 8),
+                feature_order=("rms", "zc"),
+            )
             with np.load(path) as saved:
                 self.assertEqual(path.name, "feature_normalization.npz")
                 np.testing.assert_allclose(saved["center"], stats["center"])
                 np.testing.assert_allclose(saved["scale"], stats["scale"])
                 self.assertEqual(float(saved["mu"]), stats["mu"])
+                np.testing.assert_array_equal(saved["emg_channels"], np.array([1, 3, 8]))
+                np.testing.assert_array_equal(saved["feature_order"], np.array(["rms", "zc"]))
 
     def test_mu_law_target_normalizer_round_trips(self) -> None:
         targets = np.array([[-10.0], [0.0], [10.0], [25.0]], dtype=np.float32)

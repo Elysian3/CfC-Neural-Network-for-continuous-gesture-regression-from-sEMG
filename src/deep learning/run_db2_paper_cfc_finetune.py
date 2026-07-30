@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import warnings
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ import torch
 import torch.nn as nn
 
 from train import (
+    DEFAULT_DB2_EMG_CHANNELS,
     DomainDiscriminator,
     SequenceSplit,
     build_best_cfc_config,
@@ -73,6 +75,97 @@ def parse_csv_ints(value: str) -> tuple[int, ...]:
     return items
 
 
+def parse_emg_channels(value: str) -> tuple[int, ...]:
+    """Parse one-based physical DB2 EMG channels from a strict CSV list."""
+    raw_items = value.split(",")
+    if not value.strip() or any(not item.strip() for item in raw_items):
+        raise ValueError("--emg-channels must be a non-empty comma-separated list")
+    try:
+        channels = tuple(int(item.strip()) for item in raw_items)
+    except ValueError as exc:
+        raise ValueError("--emg-channels must contain integers only") from exc
+    if any(channel <= 0 for channel in channels):
+        raise ValueError("--emg-channels uses one-based positive channel numbers")
+    if len(set(channels)) != len(channels):
+        raise ValueError("--emg-channels cannot contain duplicate channels")
+    maximum_channel = max(DEFAULT_DB2_EMG_CHANNELS)
+    if any(channel > maximum_channel for channel in channels):
+        raise ValueError(
+            f"--emg-channels must be within 1..{maximum_channel} for Ninapro DB2"
+        )
+    return channels
+
+
+def select_emg_channels(
+    emg: np.ndarray,
+    channels: tuple[int, ...],
+    *,
+    recording_id: str,
+) -> np.ndarray:
+    """Select one-based physical EMG channels before signal preprocessing."""
+    if emg.ndim != 2:
+        raise ValueError(f"{recording_id}: EMG must be a 2-D samples-by-channels array")
+    if not channels:
+        raise ValueError(f"{recording_id}: EMG channel selection cannot be empty")
+    if len(set(channels)) != len(channels):
+        raise ValueError(f"{recording_id}: EMG channel selection contains duplicates")
+    if any(channel <= 0 for channel in channels):
+        raise ValueError(f"{recording_id}: EMG channels must be one-based positive integers")
+    unavailable = [channel for channel in channels if channel > emg.shape[1]]
+    if unavailable:
+        raise ValueError(
+            f"{recording_id}: requested EMG channel {unavailable[0]}, "
+            f"but recording contains only {emg.shape[1]} channels"
+        )
+    zero_based_indices = [channel - 1 for channel in channels]
+    return emg[:, zero_based_indices]
+
+
+def resolve_resume_input_dim(
+    checkpoint_config: dict[str, Any],
+    current_config,
+    *,
+    actual_input_dim: int,
+) -> int:
+    """Validate resume feature/channel semantics and derive model input width."""
+    checkpoint_features = tuple(
+        checkpoint_config.get("feature_order", current_config.feature_order)
+    )
+    current_features = tuple(current_config.feature_order)
+    if checkpoint_features != current_features:
+        raise ValueError(
+            f"Checkpoint was trained with feature_order={checkpoint_features}, "
+            f"but current config uses feature_order={current_features}. "
+            "Use matching --feature-order or re-pretrain."
+        )
+
+    if "emg_channels" in checkpoint_config:
+        checkpoint_channels = tuple(int(value) for value in checkpoint_config["emg_channels"])
+    else:
+        checkpoint_channels = DEFAULT_DB2_EMG_CHANNELS
+        warnings.warn(
+            "Legacy checkpoint has no emg_channels metadata; treating it as the historical "
+            f"all-channel DB2 selection {DEFAULT_DB2_EMG_CHANNELS}.",
+            UserWarning,
+            stacklevel=2,
+        )
+    current_channels = tuple(current_config.emg_channels)
+    if checkpoint_channels != current_channels:
+        raise ValueError(
+            f"Checkpoint was trained with EMG channels {checkpoint_channels}, "
+            f"but current config uses EMG channels {current_channels}. "
+            "Use matching --emg-channels or re-pretrain."
+        )
+
+    checkpoint_input_dim = len(checkpoint_channels) * len(checkpoint_features)
+    if checkpoint_input_dim != actual_input_dim:
+        raise ValueError(
+            f"Checkpoint metadata implies input_dim={checkpoint_input_dim}, "
+            f"but the current data pipeline produced input_dim={actual_input_dim}."
+        )
+    return checkpoint_input_dim
+
+
 def parse_csv_subjects(value: str) -> tuple[str, ...]:
     subjects = tuple(item.strip().upper() for item in value.split(",") if item.strip())
     if not subjects:
@@ -80,17 +173,33 @@ def parse_csv_subjects(value: str) -> tuple[str, ...]:
     return subjects
 
 
-def save_feature_normalization_stats(output_dir: Path, stats: dict[str, Any]) -> Path:
+def save_feature_normalization_stats(
+    output_dir: Path,
+    stats: dict[str, Any],
+    *,
+    emg_channels: tuple[int, ...],
+    feature_order: tuple[str, ...],
+) -> Path:
     """Save training-fitted mu-law feature statistics for C header export."""
     if stats.get("method") != "mu_law":
         raise ValueError("hardware export requires mu-law feature normalization")
+    center = np.asarray(stats["center"], dtype=np.float32)
+    scale = np.asarray(stats["scale"], dtype=np.float32)
+    expected_input_dim = len(emg_channels) * len(feature_order)
+    if center.size != expected_input_dim or scale.size != expected_input_dim:
+        raise ValueError(
+            f"normalization width must equal channels * features = {expected_input_dim}; "
+            f"got center={center.size}, scale={scale.size}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "feature_normalization.npz"
     np.savez(
         path,
-        center=np.asarray(stats["center"], dtype=np.float32),
-        scale=np.asarray(stats["scale"], dtype=np.float32),
+        center=center,
+        scale=scale,
         mu=np.float32(stats["mu"]),
+        emg_channels=np.asarray(emg_channels, dtype=np.int16),
+        feature_order=np.asarray(feature_order, dtype=np.str_),
     )
     return path
 
@@ -107,9 +216,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subjects", type=str, default="all",
                         help="'all' to auto-discover, or comma-separated subject IDs")
     parser.add_argument("--exercise", type=str, default="all",
-                        help="'all' for E1+E2+E3, or comma-separated (e.g. E1,E2)")
+                        help="'all' for E1+E2 (E3 has no glove data), or comma-separated (e.g. E1,E2)")
     parser.add_argument("--actions", type=str, default="all",
                         help="'all' to use every non-rest action, or comma-separated integers")
+    parser.add_argument(
+        "--emg-channels",
+        type=str,
+        default=",".join(str(channel) for channel in DEFAULT_DB2_EMG_CHANNELS),
+        help="One-based physical DB2 EMG channels, e.g. 1,2,3,4,5,6,7,8",
+    )
     parser.add_argument(
         "--glove-columns",
         type=str,
@@ -192,6 +307,11 @@ def load_subject_filtered_split(
         restimulus = restimulus[:n_samples]
         rerepetition = rerepetition[:n_samples]
 
+        emg = select_emg_channels(
+            emg,
+            tuple(config.emg_channels),
+            recording_id=file_name,
+        )
         emg_filtered = preprocess_emg(emg, fs=2000.0)
 
         rest_threshold = _compute_rest_thresholds(
@@ -241,7 +361,11 @@ def load_subject_filtered_split(
                 rec.x_windows = np.asarray(feature_set["feature_matrix"], dtype=np.float32)
                 rec.y_windows = np.asarray(feature_set["target_values"], dtype=np.float32)
                 rec.target_alignment_indices = np.asarray(feature_set["target_alignment_indices"], dtype=np.int32)
-                rec.feature_names = list(feature_set["channel_feature_names"])
+                rec.feature_names = [
+                    f"ch{channel}_{feature_name}"
+                    for channel in config.emg_channels
+                    for feature_name in config.feature_order
+                ]
                 rec.target_names = list(feature_set["target_names"] or [])
                 rec.fs = float(feature_set["fs"])
                 rec.action_labels = np.full(feature_set["n_windows"], action, dtype=np.int16)
@@ -873,6 +997,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         actions = parse_csv_ints(args.actions)
 
     glove_columns = parse_csv_ints(args.glove_columns)
+    emg_channels = parse_emg_channels(args.emg_channels)
     feature_order = tuple(f.strip().lower() for f in args.feature_order.split(",") if f.strip())
     if not feature_order:
         raise ValueError("--feature-order cannot be empty")
@@ -883,6 +1008,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
 
     config = build_best_cfc_config(
         db2_dir=args.db2_dir,
+        emg_channels=emg_channels,
         target_source="glove",
         target_columns=glove_columns if not args.target_mapping else (),
         target_mapping=args.target_mapping,
@@ -918,6 +1044,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     print(f"  source subjects: {[subject for subject in subjects if subject != target_subject]}")
     print(f"  exercise/actions: {args.exercise} / {list(actions)}")
     print(f"  target mapping : {config.target_mapping} (output dim={len(GLOVE_COLUMN_INDICES) if config.target_mapping == 'glove_columns' else 5})")
+    print(f"  EMG channels   : {config.emg_channels} (input channels={len(config.emg_channels)})")
     print(f"  feature/window : {config.feature_order}, {args.window_ms} ms, stride {args.stride_ms} ms")
     print(f"  normalization  : mu-law mu={args.mu_law_mu}")
 
@@ -950,7 +1077,11 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
     print("  concatenating source splits...", end="", flush=True)
     source_train = concat_splits(source_train_splits)
     source_val = concat_splits(source_val_splits)
-    print(f" train={source_train.x.shape[0]} val={source_val.x.shape[0]}", flush=True)
+    print(
+        f" train={source_train.x.shape[0]} val={source_val.x.shape[0]} "
+        f"input_dim={source_train.x.shape[-1]}",
+        flush=True,
+    )
 
     print("  fitting feature normalizer...", end="", flush=True)
     x_stats = fit_feature_normalizer(
@@ -958,7 +1089,12 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         method=config.feature_normalization,
         mu=config.mu_law_mu,
     )
-    normalization_stats_path = save_feature_normalization_stats(output_dir, x_stats)
+    normalization_stats_path = save_feature_normalization_stats(
+        output_dir,
+        x_stats,
+        emg_channels=config.emg_channels,
+        feature_order=config.feature_order,
+    )
     print(" done", flush=True)
 
     print("  fitting target normalizer...", end="", flush=True)
@@ -972,7 +1108,11 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         print(f"  Resuming pretrained model from {args.resume_pretrain}", flush=True)
         ckpt = torch.load(args.resume_pretrain, map_location=device, weights_only=False)
         ckpt_config = ckpt.get("config", {})
-        input_dim = len(ckpt_config.get("feature_order", config.feature_order)) * 12
+        input_dim = resolve_resume_input_dim(
+            ckpt_config,
+            config,
+            actual_input_dim=source_train.x.shape[-1],
+        )
         ckpt_mapping = ckpt_config.get("target_mapping", "doa5")
         current_mapping = config.target_mapping
         if ckpt_mapping != current_mapping:
@@ -1046,6 +1186,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 "actions": list(actions),
                 "glove_columns_zero_based": list(glove_columns),
                 "glove_columns_one_based": [column + 1 for column in glove_columns],
+                "emg_channels_one_based": list(config.emg_channels),
                 "feature_order": list(config.feature_order),
                 "window_ms": args.window_ms,
                 "stride_ms": args.stride_ms,
@@ -1141,6 +1282,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             "actions": list(actions),
             "glove_columns_zero_based": list(glove_columns),
             "glove_columns_one_based": [column + 1 for column in glove_columns],
+            "emg_channels_one_based": list(config.emg_channels),
             "feature_order": list(config.feature_order),
             "window_ms": args.window_ms,
             "stride_ms": args.stride_ms,
