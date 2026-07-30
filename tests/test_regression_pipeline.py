@@ -11,8 +11,10 @@ DATAFLOW_DIR = REPO_ROOT / "src" / "dataflow"
 if str(DATAFLOW_DIR) not in sys.path:
     sys.path.insert(0, str(DATAFLOW_DIR))
 
+import SwRectify as windowing_module
 from SwRectify import sliding_window
 from doa_mapping import DB8_OFFICIAL_W, DB8_TO_DB2_CHANNELS, DOA5_NAMES, DOA5_W, apply_linear_doa_mapping
+import feature_extraction as feature_module
 from feature_extraction import (
     _compute_rest_thresholds,
     extract_emg_features,
@@ -22,6 +24,9 @@ from feature_extraction import (
 
 
 class RegressionPipelineTests(unittest.TestCase):
+    def test_windowing_module_omits_debug_printer(self) -> None:
+        self.assertFalse(hasattr(windowing_module, "print_window_summary"))
+
     def setUp(self) -> None:
         self.emg = np.arange(20, dtype=np.float32).reshape(10, 2)
         self.targets = np.column_stack(
@@ -141,7 +146,12 @@ class RegressionPipelineTests(unittest.TestCase):
             "fs": 2000.0,
         }
 
-        feature_set = extract_emg_features(windows, feature_order=("rms",))
+        with (
+            patch.object(feature_module, "mean_absolute_value", side_effect=AssertionError("MAV was not requested")),
+            patch.object(feature_module, "mean_absolute_value_slope", side_effect=AssertionError("MAVS was not requested")),
+            patch.object(feature_module, "waveform_length", side_effect=AssertionError("WL was not requested")),
+        ):
+            feature_set = extract_emg_features(windows, feature_order=("rms",))
 
         self.assertEqual(feature_set["feature_order"], ["rms"])
         self.assertEqual(feature_set["feature_tensor"].shape, (2, 2, 1))
@@ -153,6 +163,30 @@ class RegressionPipelineTests(unittest.TestCase):
         self.assertNotIn("ssc", feature_set)
         self.assertNotIn("zc_thresholds", feature_set)
         self.assertNotIn("ssc_thresholds", feature_set)
+
+    def test_mavs_computes_only_its_mav_dependency(self) -> None:
+        windows = sliding_window(
+            self.emg,
+            self.targets[:, :1],
+            fs=10,
+            window_ms=400,
+            stride_ms=200,
+            target_names=["angle_a"],
+        )
+        with (
+            patch.object(
+                feature_module,
+                "mean_absolute_value",
+                wraps=feature_module.mean_absolute_value,
+            ) as mock_mav,
+            patch.object(feature_module, "waveform_length", side_effect=AssertionError("WL was not requested")),
+            patch.object(feature_module, "root_mean_square", side_effect=AssertionError("RMS was not requested")),
+        ):
+            feature_set = extract_emg_features(windows, feature_order=("mavs",))
+
+        mock_mav.assert_called_once()
+        self.assertEqual(feature_set["feature_order"], ["mavs"])
+        self.assertEqual(feature_set["feature_matrix"].shape, (4, 2))
 
     def test_explicit_zc_ssc_thresholds_are_used(self) -> None:
         windows = sliding_window(
@@ -322,6 +356,61 @@ class RegressionPipelineTests(unittest.TestCase):
         self.assertIn("mav", feature_set)
         self.assertIn("wl", feature_set)
         self.assertIn("rms", feature_set)
+        self.assertEqual(
+            feature_set["channel_feature_names"],
+            ["ch1_rms", "ch1_mav", "ch1_wl", "ch2_rms", "ch2_mav", "ch2_wl"],
+        )
+
+    @patch("feature_extraction.preprocess_emg")
+    @patch("feature_extraction.load_data")
+    def test_rms_pipeline_skips_rest_threshold_calibration(
+        self,
+        mock_load_data,
+        mock_preprocess_emg,
+    ) -> None:
+        emg = np.arange(120, dtype=np.float32).reshape(20, 6)
+        glove = np.arange(440, dtype=np.float32).reshape(20, 22)
+        mock_load_data.return_value = {"emg": emg, "glove": glove}
+        mock_preprocess_emg.side_effect = lambda value, fs: value
+
+        with patch.object(
+            feature_module,
+            "_compute_rest_thresholds",
+            side_effect=AssertionError("RMS-only extraction does not need rest thresholds"),
+        ):
+            pipeline = run_feature_pipeline(
+                "synthetic.mat",
+                target_mapping="doa5",
+                feature_order=("rms",),
+                fs=10,
+                window_ms=400,
+                stride_ms=200,
+            )
+
+        self.assertEqual(pipeline["feature_set"]["feature_order"], ["rms"])
+
+    @patch("feature_extraction.preprocess_emg")
+    @patch("feature_extraction.load_data")
+    def test_feature_pipeline_accepts_generator_feature_order(
+        self,
+        mock_load_data,
+        mock_preprocess_emg,
+    ) -> None:
+        emg = np.arange(120, dtype=np.float32).reshape(20, 6)
+        glove = np.arange(440, dtype=np.float32).reshape(20, 22)
+        mock_load_data.return_value = {"emg": emg, "glove": glove}
+        mock_preprocess_emg.side_effect = lambda value, fs: value
+
+        pipeline = run_feature_pipeline(
+            "synthetic.mat",
+            target_mapping="doa5",
+            feature_order=(name for name in ("rms",)),
+            fs=10,
+            window_ms=400,
+            stride_ms=200,
+        )
+
+        self.assertEqual(pipeline["feature_set"]["feature_order"], ["rms"])
 
 
 if __name__ == "__main__":

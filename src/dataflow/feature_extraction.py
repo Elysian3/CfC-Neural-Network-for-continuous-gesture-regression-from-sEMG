@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - package-style fallback
 
 FEATURE_ORDER = ("mav", "mavs", "wl", "zc", "ssc")
 SUPPORTED_FEATURES = ("mav", "mavs", "wl", "zc", "ssc", "rms")
-DEFAULT_MU_LAW_MU = 1_048_576.0  # 2^20
+DEFAULT_MU_LAW_MU = 255.0
 DEFAULT_REST_PERCENTILE = 10.0
 DEFAULT_REST_THRESHOLD_SCALE = 1.0
 
@@ -276,6 +276,10 @@ def extract_emg_features(
     if not selected_feature_order:
         raise ValueError("feature_order cannot be empty")
 
+    need_mav = "mav" in selected_feature_order or "mavs" in selected_feature_order
+    need_mavs = "mavs" in selected_feature_order
+    need_wl = "wl" in selected_feature_order
+    need_rms = "rms" in selected_feature_order
     need_zc = "zc" in selected_feature_order
     need_ssc = "ssc" in selected_feature_order
 
@@ -292,30 +296,25 @@ def extract_emg_features(
             "_compute_rest_thresholds() to obtain a data-driven value"
         )
 
-    mav = mean_absolute_value(rectified)
-    mavs = mean_absolute_value_slope(mav)
-    wl = waveform_length(unrectified)
-    rms = root_mean_square(unrectified)
+    feature_by_name: dict[str, np.ndarray] = {}
+    if need_mav:
+        mav = mean_absolute_value(rectified)
+        if "mav" in selected_feature_order:
+            feature_by_name["mav"] = mav
+        if need_mavs:
+            feature_by_name["mavs"] = mean_absolute_value_slope(mav)
+    if need_wl:
+        feature_by_name["wl"] = waveform_length(unrectified)
+    if need_rms:
+        feature_by_name["rms"] = root_mean_square(unrectified)
 
     resolved_zc = None
     resolved_ssc = None
-    zc = None
-    ssc = None
-
     if need_zc:
         zc, resolved_zc = zero_crossings(unrectified, zc_threshold)
-    if need_ssc:
-        ssc, resolved_ssc = slope_sign_changes(unrectified, ssc_threshold)
-
-    feature_by_name = {
-        "mav": mav,
-        "mavs": mavs,
-        "wl": wl,
-        "rms": rms,
-    }
-    if need_zc:
         feature_by_name["zc"] = zc.astype(np.float32)
     if need_ssc:
+        ssc, resolved_ssc = slope_sign_changes(unrectified, ssc_threshold)
         feature_by_name["ssc"] = ssc.astype(np.float32)
 
     # Tensor shape is (windows, channels, features). This is the most natural
@@ -340,10 +339,7 @@ def extract_emg_features(
         target_values = np.asarray(target_values, dtype=np.float32)
 
     result = {
-        "mav": mav,
-        "mavs": mavs,
-        "wl": wl,
-        "rms": rms,
+        **feature_by_name,
         "feature_order": list(selected_feature_order),
         "feature_tensor": feature_tensor,
         "feature_matrix": feature_matrix,
@@ -368,10 +364,8 @@ def extract_emg_features(
         "target_names": windows.get("target_names"),
     }
     if need_zc:
-        result["zc"] = zc.astype(np.float32)
         result["zc_thresholds"] = resolved_zc
     if need_ssc:
-        result["ssc"] = ssc.astype(np.float32)
         result["ssc_thresholds"] = resolved_ssc
 
     return result
@@ -489,9 +483,12 @@ def run_feature_pipeline(
 
     filtered_emg = preprocess_emg(data["emg"], fs=fs)
 
-    # Auto-calibrate ZC/SSC thresholds from rest-state amplitude when not
-    # explicitly provided by the caller.
-    if zc_threshold is None or ssc_threshold is None:
+    selected_feature_order = tuple(str(feature_name) for feature_name in feature_order)
+    needs_auto_zc = "zc" in selected_feature_order and zc_threshold is None
+    needs_auto_ssc = "ssc" in selected_feature_order and ssc_threshold is None
+
+    # Auto-calibrate thresholds only for selected features that need them.
+    if needs_auto_zc or needs_auto_ssc:
         # Prefer restimulus (re-labeled), fall back to stimulus
         stim = data.get("restimulus")
         if stim is None:
@@ -505,9 +502,9 @@ def run_feature_pipeline(
             stride_ms=stride_ms,
         )
         auto_threshold = auto_threshold * rest_threshold_scale
-        if zc_threshold is None:
+        if needs_auto_zc:
             zc_threshold = auto_threshold
-        if ssc_threshold is None:
+        if needs_auto_ssc:
             ssc_threshold = auto_threshold
 
     windows = sliding_window(
@@ -522,7 +519,7 @@ def run_feature_pipeline(
     )
     feature_set = extract_emg_features(
         windows,
-        feature_order=feature_order,
+        feature_order=selected_feature_order,
         zc_threshold=zc_threshold,
         ssc_threshold=ssc_threshold,
     )
@@ -542,6 +539,75 @@ def run_feature_pipeline(
     }
 
 
+def _fit_array_normalizer(
+    values: np.ndarray,
+    *,
+    method: str = "zscore",
+    mu: float = DEFAULT_MU_LAW_MU,
+    value_name: str,
+) -> dict:
+    """Fit normalization statistics without choosing which split supplies them."""
+    value_array = np.asarray(values, dtype=np.float32)
+    if method == "zscore":
+        mean = value_array.mean(axis=0, dtype=np.float64).astype(np.float32)
+        std = value_array.std(axis=0, dtype=np.float64).astype(np.float32)
+        return {
+            "method": "zscore",
+            "mean": mean,
+            "std": np.maximum(std, 1e-6).astype(np.float32),
+        }
+    if method == "mu_law":
+        center = value_array.mean(axis=0, dtype=np.float64).astype(np.float32)
+        centered = value_array - center
+        scale = np.max(np.abs(centered), axis=0).astype(np.float32)
+        if mu <= 0.0:
+            raise ValueError("mu must be positive for mu-law normalization")
+        return {
+            "method": "mu_law",
+            "center": center,
+            "scale": np.maximum(scale, 1e-6).astype(np.float32),
+            "mu": float(mu),
+        }
+    raise ValueError(f"unsupported {value_name} normalization method: {method}")
+
+
+def _apply_array_normalizer(values: np.ndarray, stats: dict, *, value_name: str) -> np.ndarray:
+    """Apply precomputed normalization statistics to an array."""
+    value_array = np.asarray(values, dtype=np.float32)
+    method = stats.get("method", "zscore")
+    if method == "zscore":
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        std = np.asarray(stats["std"], dtype=np.float32)
+        return ((value_array - mean) / std).astype(np.float32)
+    if method == "mu_law":
+        center = np.asarray(stats["center"], dtype=np.float32)
+        scale = np.asarray(stats["scale"], dtype=np.float32)
+        mu = float(stats["mu"])
+        scaled = (value_array - center) / scale
+        compressed = np.sign(scaled) * (np.log1p(mu * np.abs(scaled)) / np.log1p(mu))
+        return compressed.astype(np.float32)
+    raise ValueError(f"unsupported {value_name} normalization method: {method}")
+
+
+def _inverse_array_normalizer(values: np.ndarray, stats: dict, *, value_name: str) -> np.ndarray:
+    """Map normalized array values back to their original scale."""
+    value_array = np.asarray(values, dtype=np.float32)
+    method = stats.get("method", "zscore")
+    if method == "zscore":
+        mean = np.asarray(stats["mean"], dtype=np.float32)
+        std = np.asarray(stats["std"], dtype=np.float32)
+        return (value_array * std + mean).astype(np.float32)
+    if method == "mu_law":
+        center = np.asarray(stats["center"], dtype=np.float32)
+        scale = np.asarray(stats["scale"], dtype=np.float32)
+        mu = float(stats["mu"])
+        expanded = np.sign(value_array) * (
+            np.expm1(np.abs(value_array) * np.log1p(mu)) / mu
+        )
+        return (expanded * scale + center).astype(np.float32)
+    raise ValueError(f"unsupported {value_name} normalization method: {method}")
+
+
 def fit_feature_normalizer(
     feature_matrix: np.ndarray,
     *,
@@ -554,46 +620,17 @@ def fit_feature_normalizer(
     Training code should fit these statistics on the training split only.
     Keeping this as an explicit function makes that requirement obvious.
     """
-    feature_array = np.asarray(feature_matrix, dtype=np.float32)
-    if method == "zscore":
-        mean = feature_array.mean(axis=0, dtype=np.float64).astype(np.float32)
-        std = feature_array.std(axis=0, dtype=np.float64).astype(np.float32)
-        return {
-            "method": "zscore",
-            "mean": mean,
-            "std": np.maximum(std, 1e-6).astype(np.float32),
-        }
-    if method == "mu_law":
-        center = feature_array.mean(axis=0, dtype=np.float64).astype(np.float32)
-        centered = feature_array - center
-        scale = np.max(np.abs(centered), axis=0).astype(np.float32)
-        if mu <= 0.0:
-            raise ValueError("mu must be positive for mu-law normalization")
-        return {
-            "method": "mu_law",
-            "center": center,
-            "scale": np.maximum(scale, 1e-6).astype(np.float32),
-            "mu": float(mu),
-        }
-    raise ValueError(f"unsupported feature normalization method: {method}")
+    return _fit_array_normalizer(
+        feature_matrix,
+        method=method,
+        mu=mu,
+        value_name="feature",
+    )
 
 
 def apply_feature_normalizer(feature_matrix: np.ndarray, stats: dict) -> np.ndarray:
     """Apply precomputed feature normalization statistics."""
-    feature_array = np.asarray(feature_matrix, dtype=np.float32)
-    method = stats.get("method", "zscore")
-    if method == "zscore":
-        mean = np.asarray(stats["mean"], dtype=np.float32)
-        std = np.asarray(stats["std"], dtype=np.float32)
-        return ((feature_array - mean) / std).astype(np.float32)
-    if method == "mu_law":
-        center = np.asarray(stats["center"], dtype=np.float32)
-        scale = np.asarray(stats["scale"], dtype=np.float32)
-        mu = float(stats["mu"])
-        scaled = (feature_array - center) / scale
-        compressed = np.sign(scaled) * (np.log1p(mu * np.abs(scaled)) / np.log1p(mu))
-        return compressed.astype(np.float32)
-    raise ValueError(f"unsupported feature normalization method: {method}")
+    return _apply_array_normalizer(feature_matrix, stats, value_name="feature")
 
 
 def prepare_regression_data(

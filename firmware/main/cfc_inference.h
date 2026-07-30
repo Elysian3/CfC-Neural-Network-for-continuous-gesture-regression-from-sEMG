@@ -51,9 +51,18 @@ void cfc_step(const float input[CFC_INPUT_DIM],
               float h_new[CFC_HIDDEN_DIM],
               float ts);
 
-// Full-sequence per-channel INT8 inference.  Writes 5-element output.
+// Full-sequence per-channel INT8 inference (batch, for offline validation).
 void cfc_inference_int8(const float feature_seq[CFC_SEQ_LEN][CFC_INPUT_DIM],
                         float output[CFC_OUTPUT_DIM]);
+
+// Single-step RNN inference with persistent hidden state.
+// Feed one RMS frame at a time; hidden state carries across calls.
+// Returns 5-element DoA output. Call cfc_reset_state() to zero h.
+void cfc_single_step(const float feature[CFC_INPUT_DIM],
+                     float output[CFC_OUTPUT_DIM]);
+
+// Reset persistent hidden state to zero.
+void cfc_reset_state(void);
 
 // Mu-law encode a feature vector (in-place).
 void mulaw_encode(float *features, int n);

@@ -1,7 +1,10 @@
 import copy
+import inspect
 import pathlib
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -12,9 +15,18 @@ TRAINING_DIR = REPO_ROOT / "src" / "deep learning"
 if str(TRAINING_DIR) not in sys.path:
     sys.path.insert(0, str(TRAINING_DIR))
 
+import run_db2_paper_cfc_finetune as paper_protocol
+import train as training_module
+import feature_extraction as feature_module
+from feature_extraction import (
+    DEFAULT_MU_LAW_MU,
+    apply_feature_normalizer,
+    fit_feature_normalizer,
+)
 from train import (
     DenseCfCLinearRegressor,
     DomainDiscriminator,
+    build_best_cfc_config,
     build_cfc_regressor,
     RecordingFeatures,
     SequenceSplit,
@@ -28,10 +40,43 @@ from train import (
     fit_target_normalizer,
     inverse_target_normalizer,
 )
-from run_db2_paper_cfc_finetune import freeze_for_linear_head
+from run_db2_paper_cfc_finetune import (
+    freeze_for_linear_head,
+    save_feature_normalization_stats,
+)
 
 
 class CfCTrainingHelpersTests(unittest.TestCase):
+
+    def test_paper_protocol_uses_rms_and_shared_mu_defaults(self) -> None:
+        with patch.object(sys, "argv", ["run_db2_paper_cfc_finetune.py"]):
+            args = paper_protocol.parse_args()
+
+        self.assertEqual(args.feature_order, "rms")
+        self.assertEqual(DEFAULT_MU_LAW_MU, 255.0)
+        self.assertEqual(args.mu_law_mu, DEFAULT_MU_LAW_MU)
+        self.assertEqual(build_best_cfc_config().mu_law_mu, DEFAULT_MU_LAW_MU)
+
+    def test_train_module_is_library_only(self) -> None:
+        self.assertFalse(hasattr(training_module, "main"))
+
+    def test_paper_protocol_omits_obsolete_loading_helpers(self) -> None:
+        self.assertFalse(hasattr(paper_protocol, "_resolve_actions"))
+        self.assertFalse(hasattr(paper_protocol, "load_subject_exercise_split"))
+
+    def test_paper_protocol_keeps_imports_at_module_level(self) -> None:
+        source_lines = inspect.getsource(paper_protocol).splitlines()
+        local_imports = [
+            line
+            for line in source_lines
+            if line.startswith(("    import ", "    from "))
+        ]
+        self.assertEqual(local_imports, [])
+
+    def test_paper_protocol_metadata_does_not_claim_grl_atl(self) -> None:
+        source = inspect.getsource(paper_protocol)
+        self.assertNotIn("ATL domain adaptation with GRL+DD", source)
+        self.assertIn("GAN-style alternating DD and target-network training", source)
 
     # ── Sequence construction ────────────────────────────────────────────────
 
@@ -157,6 +202,62 @@ class CfCTrainingHelpersTests(unittest.TestCase):
             self.assertEqual(parameter.requires_grad, name.startswith("head."))
 
     # ── Normalization ────────────────────────────────────────────────────────
+
+    def test_feature_and_target_normalizers_share_array_implementation(self) -> None:
+        self.assertIs(
+            training_module._fit_array_normalizer,
+            feature_module._fit_array_normalizer,
+        )
+        self.assertIs(
+            training_module._apply_array_normalizer,
+            feature_module._apply_array_normalizer,
+        )
+
+    def test_feature_and_target_normalizers_are_numerically_identical(self) -> None:
+        values = np.array(
+            [[-10.0, 2.0], [0.0, 4.0], [10.0, 8.0], [25.0, 16.0]],
+            dtype=np.float32,
+        )
+
+        for method in ("zscore", "mu_law"):
+            with self.subTest(method=method):
+                feature_stats = fit_feature_normalizer(values, method=method, mu=255.0)
+                target_stats = fit_target_normalizer(values, method=method, mu=255.0)
+                self.assertEqual(feature_stats.keys(), target_stats.keys())
+                for key in feature_stats:
+                    if isinstance(feature_stats[key], np.ndarray):
+                        np.testing.assert_allclose(feature_stats[key], target_stats[key])
+                    else:
+                        self.assertEqual(feature_stats[key], target_stats[key])
+                np.testing.assert_allclose(
+                    apply_feature_normalizer(values, feature_stats),
+                    apply_target_normalizer(values, target_stats),
+                )
+
+    def test_zscore_target_normalizer_round_trips(self) -> None:
+        targets = np.array([[-10.0], [0.0], [10.0], [25.0]], dtype=np.float32)
+
+        stats = fit_target_normalizer(targets, method="zscore")
+        normalized = apply_target_normalizer(targets, stats)
+        recovered = inverse_target_normalizer(normalized, stats)
+
+        np.testing.assert_allclose(recovered, targets, atol=1e-5)
+
+    def test_feature_normalization_stats_are_saved_for_header_export(self) -> None:
+        stats = {
+            "method": "mu_law",
+            "center": np.array([1.0, 2.0], dtype=np.float32),
+            "scale": np.array([3.0, 4.0], dtype=np.float32),
+            "mu": 255.0,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = save_feature_normalization_stats(pathlib.Path(tmp_dir), stats)
+            with np.load(path) as saved:
+                self.assertEqual(path.name, "feature_normalization.npz")
+                np.testing.assert_allclose(saved["center"], stats["center"])
+                np.testing.assert_allclose(saved["scale"], stats["scale"])
+                self.assertEqual(float(saved["mu"]), stats["mu"])
 
     def test_mu_law_target_normalizer_round_trips(self) -> None:
         targets = np.array([[-10.0], [0.0], [10.0], [25.0]], dtype=np.float32)

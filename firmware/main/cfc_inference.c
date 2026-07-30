@@ -1,5 +1,5 @@
 // cfc_inference.c — DenseCfC h=256 RMS-only per-channel INT8 inference
-// INT8 weights copied from flash to SRAM at init for fast inner-loop access.
+// INT8 weights are read directly from flash for a single-step latency baseline.
 #include "weights.h"
 #include "cfc_inference.h"
 #include "normalization.h"
@@ -10,16 +10,8 @@ static float lecun_lut  [LUT_SIZE];
 static float tanh_lut   [LUT_SIZE];
 static float sigmoid_lut[LUT_SIZE];
 
-// ── SRAM weight buffers (total ~163 KB, fits in ~300 KB SRAM budget) ──────
-static int8_t sram_backbone_w[128 * 268];
-static int8_t sram_ff1_w     [256 * 128];
-static int8_t sram_ff2_w     [256 * 128];
-static int8_t sram_time_a_w  [256 * 128];
-static int8_t sram_time_b_w  [256 * 128];
-static int8_t sram_head_w    [  5 * 256];
-
 void cfc_lut_init(void) {
-    // 1. Build activation LUTs
+    // Build activation LUTs. Weights remain in flash.
     for (int i = 0; i < LUT_SIZE; i++) {
         float x = LUT_X_MIN + (float)i * LUT_DX;
         float tx = tanhf(x);
@@ -27,14 +19,6 @@ void cfc_lut_init(void) {
         tanh_lut[i]    = tx;
         sigmoid_lut[i] = 1.0f / (1.0f + expf(-x));
     }
-
-    // 2. Copy INT8 weights flash → SRAM (fast access in inner loop)
-    memcpy(sram_backbone_w, cfc_backbone_weight, sizeof(sram_backbone_w));
-    memcpy(sram_ff1_w,      cfc_ff1_weight,      sizeof(sram_ff1_w));
-    memcpy(sram_ff2_w,      cfc_ff2_weight,      sizeof(sram_ff2_w));
-    memcpy(sram_time_a_w,   cfc_time_a_weight,   sizeof(sram_time_a_w));
-    memcpy(sram_time_b_w,   cfc_time_b_weight,   sizeof(sram_time_b_w));
-    memcpy(sram_head_w,     cfc_head_weight,     sizeof(sram_head_w));
 }
 
 // ── LUT lookup with linear interpolation ───────────────────────────────────
@@ -48,7 +32,7 @@ static inline float lut_lookup(const float *table, float x) {
     return table[idx] * (1.0f - frac) + table[idx + 1] * frac;
 }
 
-// ── Per-channel INT8 fully-connected layer (reads weights from SRAM) ───────
+// ── Per-channel INT8 fully-connected layer (reads weights from flash) ──────
 
 void fc_int8(const float *input,
              const int8_t *weight_q,
@@ -85,7 +69,7 @@ void cfc_step(const float input[CFC_INPUT_DIM],
     // 2. Backbone: Linear(268→128) + LeCun
     float x[CFC_BACKBONE_UNITS];
     fc_int8(backbone_in,
-            sram_backbone_w, cfc_backbone_bias,
+            cfc_backbone_weight, cfc_backbone_bias,
             cfc_backbone_weight_scale,
             x, CFC_BACKBONE_IN, CFC_BACKBONE_UNITS);
     for (int i = 0; i < CFC_BACKBONE_UNITS; i++)
@@ -93,26 +77,26 @@ void cfc_step(const float input[CFC_INPUT_DIM],
 
     // 3. ff1: Linear(128→256) + tanh
     float ff1[CFC_HIDDEN_DIM];
-    fc_int8(x, sram_ff1_w, cfc_ff1_bias, cfc_ff1_weight_scale,
+    fc_int8(x, cfc_ff1_weight, cfc_ff1_bias, cfc_ff1_weight_scale,
             ff1, CFC_BACKBONE_UNITS, CFC_HIDDEN_DIM);
     for (int i = 0; i < CFC_HIDDEN_DIM; i++)
         ff1[i] = lut_lookup(tanh_lut, ff1[i]);
 
     // 4. ff2: Linear(128→256) + tanh
     float ff2[CFC_HIDDEN_DIM];
-    fc_int8(x, sram_ff2_w, cfc_ff2_bias, cfc_ff2_weight_scale,
+    fc_int8(x, cfc_ff2_weight, cfc_ff2_bias, cfc_ff2_weight_scale,
             ff2, CFC_BACKBONE_UNITS, CFC_HIDDEN_DIM);
     for (int i = 0; i < CFC_HIDDEN_DIM; i++)
         ff2[i] = lut_lookup(tanh_lut, ff2[i]);
 
     // 5. t_a: Linear(128→256) — no activation
     float ta[CFC_HIDDEN_DIM];
-    fc_int8(x, sram_time_a_w, cfc_time_a_bias, cfc_time_a_weight_scale,
+    fc_int8(x, cfc_time_a_weight, cfc_time_a_bias, cfc_time_a_weight_scale,
             ta, CFC_BACKBONE_UNITS, CFC_HIDDEN_DIM);
 
     // 6. t_b: Linear(128→256) — no activation
     float tb[CFC_HIDDEN_DIM];
-    fc_int8(x, sram_time_b_w, cfc_time_b_bias, cfc_time_b_weight_scale,
+    fc_int8(x, cfc_time_b_weight, cfc_time_b_bias, cfc_time_b_weight_scale,
             tb, CFC_BACKBONE_UNITS, CFC_HIDDEN_DIM);
 
     // 7. Gate interpolation
@@ -122,7 +106,17 @@ void cfc_step(const float input[CFC_INPUT_DIM],
     }
 }
 
-// ── Sequence inference ─────────────────────────────────────────────────────
+// ── Persistent hidden state for single-step RNN inference ──────────────────
+
+static float persistent_h[CFC_HIDDEN_DIM];
+static int   h_initialized = 0;
+
+void cfc_reset_state(void) {
+    memset(persistent_h, 0, sizeof(persistent_h));
+    h_initialized = 0;
+}
+
+// ── Sequence inference (batch, for offline validation) ─────────────────────
 
 void cfc_inference_int8(const float feature_seq[CFC_SEQ_LEN][CFC_INPUT_DIM],
                         float output[CFC_OUTPUT_DIM])
@@ -137,7 +131,29 @@ void cfc_inference_int8(const float feature_seq[CFC_SEQ_LEN][CFC_INPUT_DIM],
     }
 
     fc_int8(h,
-            sram_head_w, cfc_head_bias,
+            cfc_head_weight, cfc_head_bias,
+            cfc_head_weight_scale,
+            output, CFC_HIDDEN_DIM, CFC_OUTPUT_DIM);
+}
+
+// ── Single-step RNN inference (one frame, persistent hidden state) ─────────
+
+void cfc_single_step(const float feature[CFC_INPUT_DIM],
+                     float output[CFC_OUTPUT_DIM])
+{
+    if (!h_initialized) {
+        memset(persistent_h, 0, sizeof(persistent_h));
+        h_initialized = 1;
+    }
+
+    // Run ONE CfC time-step with the persistent hidden state
+    float h_new[CFC_HIDDEN_DIM];
+    cfc_step(feature, persistent_h, h_new, 1.0f);
+    memcpy(persistent_h, h_new, sizeof(persistent_h));
+
+    // Head layer: hidden → 5-DoA output
+    fc_int8(persistent_h,
+            cfc_head_weight, cfc_head_bias,
             cfc_head_weight_scale,
             output, CFC_HIDDEN_DIM, CFC_OUTPUT_DIM);
 }

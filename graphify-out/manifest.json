@@ -1,62 +1,342 @@
 {
   "D:\\Project Antikythera\\src\\dataflow\\SwRectify.py": {
-    "mtime": 1779515292.6164913,
-    "ast_hash": "758c2f46ca648f58aa3b81afac1b97cf",
-    "semantic_hash": "758c2f46ca648f58aa3b81afac1b97cf"
+    "mtime": 1782702768.874498,
+    "ast_hash": "2880c34b1c5428836b3f1debdf4340d9",
+    "semantic_hash": "2880c34b1c5428836b3f1debdf4340d9"
   },
   "D:\\Project Antikythera\\src\\dataflow\\datapreprocess.py": {
-    "mtime": 1777010111.1000912,
-    "ast_hash": "54b32e302571a7f4c363de546a261476",
-    "semantic_hash": "54b32e302571a7f4c363de546a261476"
+    "mtime": 1782700275.0688086,
+    "ast_hash": "fcb0e7a8ae5b639765e9548f72ef4d7f",
+    "semantic_hash": "fcb0e7a8ae5b639765e9548f72ef4d7f"
   },
   "D:\\Project Antikythera\\src\\dataflow\\doa_mapping.py": {
-    "mtime": 1777634092.6527803,
-    "ast_hash": "94f4e54658cd019fc65c3b2ee20d5cc9",
-    "semantic_hash": "94f4e54658cd019fc65c3b2ee20d5cc9"
+    "mtime": 1781605784.9598327,
+    "ast_hash": "ff9faa7f97d4212afa53aaf945d2b0c3",
+    "semantic_hash": "ff9faa7f97d4212afa53aaf945d2b0c3"
   },
   "D:\\Project Antikythera\\src\\dataflow\\feature_extraction.py": {
-    "mtime": 1779515264.2598293,
-    "ast_hash": "6dd31449745163953c593c96cc4bfb09",
-    "semantic_hash": "6dd31449745163953c593c96cc4bfb09"
+    "mtime": 1782871678.5223181,
+    "ast_hash": "fd4ad27ec6006c7659e8137b28931c65",
+    "semantic_hash": "fd4ad27ec6006c7659e8137b28931c65"
   },
   "D:\\Project Antikythera\\src\\deep learning\\run_db2_paper_cfc_finetune.py": {
-    "mtime": 1780034089.4122956,
-    "ast_hash": "3122c8e6145eb18052a236cb115dd14d",
-    "semantic_hash": "3122c8e6145eb18052a236cb115dd14d"
-  },
-  "D:\\Project Antikythera\\src\\deep learning\\run_db2_single_subject.py": {
-    "mtime": 1777262759.3783865,
-    "ast_hash": "fe7b5266aa8f2646c1d5f695e8ebc752",
-    "semantic_hash": "fe7b5266aa8f2646c1d5f695e8ebc752"
-  },
-  "D:\\Project Antikythera\\src\\deep learning\\run_db2_subject_adaptation.py": {
-    "mtime": 1777166594.1137998,
-    "ast_hash": "ba9f4d82556909dfc2b274733a416062",
-    "semantic_hash": "ba9f4d82556909dfc2b274733a416062"
-  },
-  "D:\\Project Antikythera\\src\\deep learning\\run_doa5_subject_adaptation.py": {
-    "mtime": 1779515304.863651,
-    "ast_hash": "1308c932e32ec6d8ae328c93041d325d",
-    "semantic_hash": "1308c932e32ec6d8ae328c93041d325d"
-  },
-  "D:\\Project Antikythera\\src\\deep learning\\run_semantic_dof_screen.py": {
-    "mtime": 1777262628.672145,
-    "ast_hash": "f3dcf92e687bf608b5d6acebcc1d1d12",
-    "semantic_hash": "f3dcf92e687bf608b5d6acebcc1d1d12"
+    "mtime": 1783754467.8915434,
+    "ast_hash": "73ae6ce1eebdcd0647954d04762ad83f",
+    "semantic_hash": "73ae6ce1eebdcd0647954d04762ad83f"
   },
   "D:\\Project Antikythera\\src\\deep learning\\train.py": {
-    "mtime": 1780019022.5143974,
-    "ast_hash": "bd9c27a581f1dac8982ca4820a041bc6",
-    "semantic_hash": "bd9c27a581f1dac8982ca4820a041bc6"
+    "mtime": 1783080955.726585,
+    "ast_hash": "d2f567433908c0b36ac152ac8bcdff6b",
+    "semantic_hash": "d2f567433908c0b36ac152ac8bcdff6b"
   },
   "D:\\Project Antikythera\\src\\hardwareOperation\\load-model.cpp": {
-    "mtime": 1775457411.0359051,
-    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
-    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+    "mtime": 1784552551.7731173,
+    "ast_hash": "81051bcc2cf1bedf378224b0a93e2877",
+    "semantic_hash": "81051bcc2cf1bedf378224b0a93e2877"
   },
   "D:\\Project Antikythera\\src\\hardwareOperation\\quantize_test.py": {
-    "mtime": 1779794093.7673154,
-    "ast_hash": "f9d080f79bde0156068b51a804cbb571",
-    "semantic_hash": "f9d080f79bde0156068b51a804cbb571"
+    "mtime": 1783413744.17027,
+    "ast_hash": "e2fa4871daf1081c7b8ec464d816ed0a",
+    "semantic_hash": "e2fa4871daf1081c7b8ec464d816ed0a"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\idle-notif-cooldown.json": {
+    "mtime": 1784115839.9514663,
+    "ast_hash": "e1cdd8f3410abd8a58a6d640abda8705",
+    "semantic_hash": "e1cdd8f3410abd8a58a6d640abda8705"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\last-tool-error-state.json": {
+    "mtime": 1784098324.843383,
+    "ast_hash": "5595b1817bf59aa4c28e9512183c2e55",
+    "semantic_hash": "5595b1817bf59aa4c28e9512183c2e55"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\pre-tool-advisory-throttle.json": {
+    "mtime": 1784117397.7164328,
+    "ast_hash": "a760d2fe3b1e5ce1ea49d52aa0650390",
+    "semantic_hash": "a760d2fe3b1e5ce1ea49d52aa0650390"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\ralph-state.json": {
+    "mtime": 1784117239.0291133,
+    "ast_hash": "9949744fb46b5828cad6e6e51894069a",
+    "semantic_hash": "9949744fb46b5828cad6e6e51894069a"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\skill-active-state.json": {
+    "mtime": 1784099566.4137847,
+    "ast_hash": "1f989fdaf1550b2b601fcb73d6aee05a",
+    "semantic_hash": "1f989fdaf1550b2b601fcb73d6aee05a"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\ultrawork-state.json": {
+    "mtime": 1784115896.783238,
+    "ast_hash": "50755eada0ba18a38fd59828a3c5c7e4",
+    "semantic_hash": "50755eada0ba18a38fd59828a3c5c7e4"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\cfc_inference.c": {
+    "mtime": 1784099200.3563447,
+    "ast_hash": "f2be776fd2b39e2b1ac364b327270a12",
+    "semantic_hash": "f2be776fd2b39e2b1ac364b327270a12"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\cfc_inference.h": {
+    "mtime": 1784099295.514638,
+    "ast_hash": "95c25a046fcc2d1f239961cb49f5fa09",
+    "semantic_hash": "95c25a046fcc2d1f239961cb49f5fa09"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\export_weights.py": {
+    "mtime": 1784096201.3363943,
+    "ast_hash": "7525df214573d128ae58d6d2d07620bc",
+    "semantic_hash": "7525df214573d128ae58d6d2d07620bc"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\features.c": {
+    "mtime": 1784114193.8910193,
+    "ast_hash": "89f2819584d2cabd9d1eda82ddea735e",
+    "semantic_hash": "89f2819584d2cabd9d1eda82ddea735e"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\features.h": {
+    "mtime": 1784114182.4589086,
+    "ast_hash": "2647f36d0d9433cc3df52b31202ce8a0",
+    "semantic_hash": "2647f36d0d9433cc3df52b31202ce8a0"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\hardware_preflight.py": {
+    "mtime": 1784092889.0756595,
+    "ast_hash": "a34d147799d87c747eb1d505a35a1bb3",
+    "semantic_hash": "a34d147799d87c747eb1d505a35a1bb3"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\main.c": {
+    "mtime": 1784207707.446439,
+    "ast_hash": "103f990044ab26255309c736c01c20db",
+    "semantic_hash": "103f990044ab26255309c736c01c20db"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\normalization.h": {
+    "mtime": 1784096211.8835466,
+    "ast_hash": "f782361f37a1dbd5abbe484390861b0b",
+    "semantic_hash": "f782361f37a1dbd5abbe484390861b0b"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\test_cfc_pc.c": {
+    "mtime": 1784099456.7966921,
+    "ast_hash": "ab8d4bd79c42f54c8e35c19ff0cd20a4",
+    "semantic_hash": "ab8d4bd79c42f54c8e35c19ff0cd20a4"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\test_emg_data.h": {
+    "mtime": 1784114643.604524,
+    "ast_hash": "81b3ce790da2f846c8fe5d85a0b081d7",
+    "semantic_hash": "81b3ce790da2f846c8fe5d85a0b081d7"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\test_features_pc.c": {
+    "mtime": 1784552551.7731173,
+    "ast_hash": "163982e04119bd0d7794047f8cc9181a",
+    "semantic_hash": "163982e04119bd0d7794047f8cc9181a"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\test_golden_data.h": {
+    "mtime": 1784098347.4080517,
+    "ast_hash": "7b7f23ecad5e4b8faf66bbb052cb4657",
+    "semantic_hash": "7b7f23ecad5e4b8faf66bbb052cb4657"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\weights.h": {
+    "mtime": 1784096211.1186702,
+    "ast_hash": "31b135388fdc48a94a7328ddc8ba00c5",
+    "semantic_hash": "31b135388fdc48a94a7328ddc8ba00c5"
+  },
+  "D:\\Project Antikythera\\src\\AGENTS.md": {
+    "mtime": 1779527911.8219676,
+    "ast_hash": "fc4d42bb596c7d0012afd7b371d44cea",
+    "semantic_hash": "fc4d42bb596c7d0012afd7b371d44cea"
+  },
+  "D:\\Project Antikythera\\src\\data\\AGENTS.md": {
+    "mtime": 1779527912.1223762,
+    "ast_hash": "27e4831171699e5a28d6993682b4b6f8",
+    "semantic_hash": "27e4831171699e5a28d6993682b4b6f8"
+  },
+  "D:\\Project Antikythera\\src\\data\\DB2\\AGENTS.md": {
+    "mtime": 1779527913.3391685,
+    "ast_hash": "79cbaeae562781ce3ae7193c969f299f",
+    "semantic_hash": "79cbaeae562781ce3ae7193c969f299f"
+  },
+  "D:\\Project Antikythera\\src\\data\\DB8\\AGENTS.md": {
+    "mtime": 1779527913.642205,
+    "ast_hash": "4170b4f78cd7fb3aeb13b54a5834b435",
+    "semantic_hash": "4170b4f78cd7fb3aeb13b54a5834b435"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\10Amar.txt": {
+    "mtime": 1376195635.0,
+    "ast_hash": "c2f344292cfb651d250fb049b36fba8a",
+    "semantic_hash": "c2f344292cfb651d250fb049b36fba8a"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\10Apie.txt": {
+    "mtime": 1376195621.0,
+    "ast_hash": "f4bc045984fd33ac85cd3aeb961af053",
+    "semantic_hash": "f4bc045984fd33ac85cd3aeb961af053"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\10Asen.txt": {
+    "mtime": 1376195610.0,
+    "ast_hash": "9c1abe5e327aa5d00bf2db2353b082c9",
+    "semantic_hash": "9c1abe5e327aa5d00bf2db2353b082c9"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\11Amar.txt": {
+    "mtime": 1376195709.0,
+    "ast_hash": "53038b855f2e9476c7f9c87416c2414f",
+    "semantic_hash": "53038b855f2e9476c7f9c87416c2414f"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\11Apie.txt": {
+    "mtime": 1376195691.0,
+    "ast_hash": "a3114dcbe1003f7540154a18d6784b35",
+    "semantic_hash": "a3114dcbe1003f7540154a18d6784b35"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\11Asen.txt": {
+    "mtime": 1376195682.0,
+    "ast_hash": "a21e8453c4cb2f2f5317b6797e9268cd",
+    "semantic_hash": "a21e8453c4cb2f2f5317b6797e9268cd"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\1Amar.txt": {
+    "mtime": 1342503364.0,
+    "ast_hash": "28d0ace225bab62e54881749ae8de0f4",
+    "semantic_hash": "28d0ace225bab62e54881749ae8de0f4"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\1Apie.txt": {
+    "mtime": 1342503348.0,
+    "ast_hash": "f4a5894dcea0d7fa585e14ca39ae73b4",
+    "semantic_hash": "f4a5894dcea0d7fa585e14ca39ae73b4"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\1Asen.txt": {
+    "mtime": 1342503396.0,
+    "ast_hash": "d56c4560908cf0c1dae380b3d0447b61",
+    "semantic_hash": "d56c4560908cf0c1dae380b3d0447b61"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\2Amar.txt": {
+    "mtime": 1342503444.0,
+    "ast_hash": "f103478998fc1bb905111de97fb20bcc",
+    "semantic_hash": "f103478998fc1bb905111de97fb20bcc"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\2Apie.txt": {
+    "mtime": 1342503422.0,
+    "ast_hash": "2cd47ec4d722f17a4481c1979cef7a7f",
+    "semantic_hash": "2cd47ec4d722f17a4481c1979cef7a7f"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\2Asen.txt": {
+    "mtime": 1342503470.0,
+    "ast_hash": "aec77cb9228cf2a6244725bddfede0e2",
+    "semantic_hash": "aec77cb9228cf2a6244725bddfede0e2"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\3Amar.txt": {
+    "mtime": 1342503540.0,
+    "ast_hash": "1df5eefb1a41ccc57f4b290af57f53e1",
+    "semantic_hash": "1df5eefb1a41ccc57f4b290af57f53e1"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\3Apie.txt": {
+    "mtime": 1342503508.0,
+    "ast_hash": "36b0974af1dbac0f122047c5d06df3a0",
+    "semantic_hash": "36b0974af1dbac0f122047c5d06df3a0"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\3Asen.txt": {
+    "mtime": 1342503566.0,
+    "ast_hash": "3e595c3632e44e1d23ab6fa97cd806d0",
+    "semantic_hash": "3e595c3632e44e1d23ab6fa97cd806d0"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\4Amar.txt": {
+    "mtime": 1342503638.0,
+    "ast_hash": "2cce5976750cd5368442adb8267bd9a5",
+    "semantic_hash": "2cce5976750cd5368442adb8267bd9a5"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\4Apie.txt": {
+    "mtime": 1342503596.0,
+    "ast_hash": "985b00e5a12fab347ce2bd866f4231c9",
+    "semantic_hash": "985b00e5a12fab347ce2bd866f4231c9"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\4Asen.txt": {
+    "mtime": 1342503652.0,
+    "ast_hash": "13350daf2281df20dbfba52f653089a7",
+    "semantic_hash": "13350daf2281df20dbfba52f653089a7"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\5Amar.txt": {
+    "mtime": 1342503786.0,
+    "ast_hash": "24182246188ca4c8d7eb7dddb2525b1f",
+    "semantic_hash": "24182246188ca4c8d7eb7dddb2525b1f"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\5Apie.txt": {
+    "mtime": 1342503776.0,
+    "ast_hash": "3fbd27f6e6a96d74b69a37900dfbe158",
+    "semantic_hash": "3fbd27f6e6a96d74b69a37900dfbe158"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\5Asen.txt": {
+    "mtime": 1342503804.0,
+    "ast_hash": "ae09d3ffa876c406aa3dc5953731126c",
+    "semantic_hash": "ae09d3ffa876c406aa3dc5953731126c"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\6Amar.txt": {
+    "mtime": 1342503840.0,
+    "ast_hash": "1d05d6306b67cb517b74a9718b7d7103",
+    "semantic_hash": "1d05d6306b67cb517b74a9718b7d7103"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\6Apie.txt": {
+    "mtime": 1342503822.0,
+    "ast_hash": "cd169571c60f2401a18c8dafc07bb5a5",
+    "semantic_hash": "cd169571c60f2401a18c8dafc07bb5a5"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\6Asen.txt": {
+    "mtime": 1342503848.0,
+    "ast_hash": "74c773a1687de76acd33f8be25b6d69b",
+    "semantic_hash": "74c773a1687de76acd33f8be25b6d69b"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\7Amar.txt": {
+    "mtime": 1342503882.0,
+    "ast_hash": "0d10b9cd12ef96949ba618b899b67815",
+    "semantic_hash": "0d10b9cd12ef96949ba618b899b67815"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\7Apie.txt": {
+    "mtime": 1342503892.0,
+    "ast_hash": "f09c41868545756c4dde97909545d4a2",
+    "semantic_hash": "f09c41868545756c4dde97909545d4a2"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\7Asen.txt": {
+    "mtime": 1342503874.0,
+    "ast_hash": "c19082d82d43f9f310257398c992b867",
+    "semantic_hash": "c19082d82d43f9f310257398c992b867"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\8Amar.txt": {
+    "mtime": 1342503950.0,
+    "ast_hash": "779531a8430c7776df02f00b9e96666d",
+    "semantic_hash": "779531a8430c7776df02f00b9e96666d"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\8Apie.txt": {
+    "mtime": 1342503908.0,
+    "ast_hash": "432371f5a3cf90bf7990945a4120838b",
+    "semantic_hash": "432371f5a3cf90bf7990945a4120838b"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\8Asen.txt": {
+    "mtime": 1342503962.0,
+    "ast_hash": "8957c64d480400632a3448f5a2d0e5e3",
+    "semantic_hash": "8957c64d480400632a3448f5a2d0e5e3"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\9Amar.txt": {
+    "mtime": 1376195564.0,
+    "ast_hash": "cba4c3f7c61faa02c138949224a8f3f4",
+    "semantic_hash": "cba4c3f7c61faa02c138949224a8f3f4"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\9Apie.txt": {
+    "mtime": 1376195545.0,
+    "ast_hash": "da1b62a86878668b072d3c4f568cd8da",
+    "semantic_hash": "da1b62a86878668b072d3c4f568cd8da"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\9Asen.txt": {
+    "mtime": 1376195524.0,
+    "ast_hash": "03002be19174669d97a2d7c8963f707d",
+    "semantic_hash": "03002be19174669d97a2d7c8963f707d"
+  },
+  "D:\\Project Antikythera\\src\\data\\LowerLimbTestData\\AGENTS.md": {
+    "mtime": 1779527913.9446657,
+    "ast_hash": "3e6effd682b52ba499255294d92f9321",
+    "semantic_hash": "3e6effd682b52ba499255294d92f9321"
+  },
+  "D:\\Project Antikythera\\src\\dataflow\\AGENTS.md": {
+    "mtime": 1779673438.8918061,
+    "ast_hash": "0672fabc045220dcdb72f8a61d1a5ee2",
+    "semantic_hash": "0672fabc045220dcdb72f8a61d1a5ee2"
+  },
+  "D:\\Project Antikythera\\src\\deep learning\\AGENTS.md": {
+    "mtime": 1782979780.4570644,
+    "ast_hash": "1b58d0e6d912cbe4fdcbf22545bfdf7e",
+    "semantic_hash": "1b58d0e6d912cbe4fdcbf22545bfdf7e"
+  },
+  "D:\\Project Antikythera\\src\\hardwareOperation\\AGENTS.md": {
+    "mtime": 1779673271.8042786,
+    "ast_hash": "bab31ff0b8e621ab1842eaafa5a88ed6",
+    "semantic_hash": "bab31ff0b8e621ab1842eaafa5a88ed6"
   }
 }
