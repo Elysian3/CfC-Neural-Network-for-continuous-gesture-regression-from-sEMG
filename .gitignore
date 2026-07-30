@@ -14,6 +14,8 @@ dist/
 build/
 .eggs/
 *.so
+*.o
+*.exe
 
 # ── Virtual environments ──────────────────────────────────────────────────────
 .venv/
@@ -54,6 +56,12 @@ CLAUDE.md
 reference files/
 .gitignore
 docs/
+!docs/
+!docs/architecture.md
+!src/dataflow/AGENTS.md
+!src/deep learning/AGENTS.md
+!src/hardwareOperation/AGENTS.md
+!tests/AGENTS.md
 api.md
 
 # ── ESP-IDF firmware build artefacts ────────────────────────────────────────
@@ -61,4 +69,3 @@ firmware/managed_components/
 firmware/dependencies.lock
 firmware/sdkconfig
 firmware/sdkconfig.old
-

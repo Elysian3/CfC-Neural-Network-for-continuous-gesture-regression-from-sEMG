@@ -21,12 +21,13 @@ from train import (
     build_best_cfc_config,
     build_cfc_regressor,
     build_sequence_split,
+    compute_grouped_regression_metrics,
+    compute_regression_metrics,
     discover_target_files,
     evaluate_split,
     fit_feature_normalizer,
     fit_target_normalizer,
     list_db2_files,
-    load_recording_features,
     make_jsonable,
     make_train_loader,
     normalize_sequence_inputs,
@@ -38,7 +39,7 @@ from train import (
 )
 from datapreprocess import load_data, preprocess_emg
 from SwRectify import sliding_window
-from feature_extraction import _compute_rest_thresholds, extract_emg_features
+from feature_extraction import DEFAULT_MU_LAW_MU, _compute_rest_thresholds, extract_emg_features
 from doa_mapping import (
     apply_linear_doa_mapping, DOA5_NAMES,
     GLOVE_COLUMN_NAMES, GLOVE_COLUMN_INDICES, GLOVE_COLUMNS_MAPPING_NAME,
@@ -65,15 +66,6 @@ def _discover_subjects(db2_dir: Path) -> list[str]:
     return sorted(subjects, key=lambda s: (int(s[1:]) if s[1:].isdigit() else 0, s))
 
 
-def _resolve_actions(data_actions: set[int], requested: tuple[int, ...] | None) -> tuple[int, ...]:
-    """If ``requested`` is empty or the special sentinel (-1,), return all
-    non-rest actions found in ``data_actions``.  Otherwise return the
-    requested actions unchanged."""
-    if not requested or requested == (-1,):
-        return tuple(sorted(a for a in data_actions if a > 0))
-    return requested
-
-
 def parse_csv_ints(value: str) -> tuple[int, ...]:
     items = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     if not items:
@@ -86,6 +78,21 @@ def parse_csv_subjects(value: str) -> tuple[str, ...]:
     if not subjects:
         raise ValueError("subject list cannot be empty")
     return subjects
+
+
+def save_feature_normalization_stats(output_dir: Path, stats: dict[str, Any]) -> Path:
+    """Save training-fitted mu-law feature statistics for C header export."""
+    if stats.get("method") != "mu_law":
+        raise ValueError("hardware export requires mu-law feature normalization")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / "feature_normalization.npz"
+    np.savez(
+        path,
+        center=np.asarray(stats["center"], dtype=np.float32),
+        scale=np.asarray(stats["scale"], dtype=np.float32),
+        mu=np.float32(stats["mu"]),
+    )
+    return path
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,7 +118,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--window-ms", type=float, default=200.0)
     parser.add_argument("--stride-ms", type=float, default=50.0)
-    parser.add_argument("--mu-law-mu", type=float, default=255.0)  # G.711 standard
+    parser.add_argument("--mu-law-mu", type=float, default=DEFAULT_MU_LAW_MU)
     parser.add_argument("--hidden-units", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--max-epochs", type=int, default=400)
@@ -123,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-offset-samples", type=int, default=200)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--cfc-dropout", type=float, default=0.1)
-    parser.add_argument("--feature-order", type=str, default="mav,mavs,wl,zc,ssc",
+    parser.add_argument("--feature-order", type=str, default=",".join(PAPER_FEATURE_ORDER),
                         help="Comma-separated feature names (must be subset of supported features)")
     parser.add_argument("--target-mapping", type=str, default="doa5",
                         help="Target mapping: 'doa5' (5 DoA angles) or 'glove_columns' (13 individual glove sensors)")
@@ -151,15 +158,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-pretrain", type=Path, default=None,
                         help="Skip pretraining; load pretrained model from this checkpoint path")
     return parser.parse_args()
-
-
-def load_subject_exercise_split(subject: str, exercise: str, config) -> SequenceSplit:
-    available_files = {path.name: path for path in list_db2_files(config.db2_dir)}
-    file_name = f"{subject}_{exercise}_A1.mat"
-    if file_name not in available_files:
-        raise FileNotFoundError(f"missing DB2 file for paper protocol: {file_name}")
-    recording = load_recording_features(available_files[file_name], config)
-    return build_sequence_split([recording], seq_len=config.seq_len, seq_stride=config.seq_stride)
 
 
 def load_subject_filtered_split(
@@ -787,7 +785,6 @@ def _compute_doa_metrics_from_glove(
     action_labels: np.ndarray | None = None,
 ) -> dict:
     """Convert glove-column predictions to 5-DoA metrics via post-hoc DOA5_W mapping."""
-    from train import compute_regression_metrics, compute_grouped_regression_metrics
     y_true_doa = glove_to_doa(y_true_glove)
     y_pred_doa = glove_to_doa(y_pred_glove)
     metrics = compute_regression_metrics(y_true_doa, y_pred_doa)
@@ -961,6 +958,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         method=config.feature_normalization,
         mu=config.mu_law_mu,
     )
+    normalization_stats_path = save_feature_normalization_stats(output_dir, x_stats)
     print(" done", flush=True)
 
     print("  fitting target normalizer...", end="", flush=True)
@@ -1071,6 +1069,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             **({"zero_shot_doa_metrics": make_jsonable(zero_shot["doa_metrics"])} if "doa_metrics" in zero_shot else {}),
             "artifacts": {
                 "pretrain_checkpoint": str(pretrain_checkpoint),
+                "feature_normalization": str(normalization_stats_path),
             },
         }
         summary_path = output_dir / "summary.json"
@@ -1147,7 +1146,11 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
             "stride_ms": args.stride_ms,
             "mu_law_mu": args.mu_law_mu,
             "train_repetitions_per_action": args.train_repetitions_per_action,
-            "fine_tune": "head-only FT; ATL disabled" if not args.enable_atl else "ATL domain adaptation with GRL+DD",
+            "fine_tune": (
+                "head-only FT; ATL disabled"
+                if not args.enable_atl
+                else "GAN-style alternating DD and target-network training"
+            ),
         },
         "config": make_jsonable(asdict(config)),
         "repetition_plan": repetition_plan,
@@ -1174,6 +1177,7 @@ def run_protocol(args: argparse.Namespace) -> dict[str, Any]:
         "artifacts": {
             "pretrain_checkpoint": str(pretrain_checkpoint),
             "adapted_checkpoint": str(adapted_checkpoint),
+            "feature_normalization": str(normalization_stats_path),
         },
     }
     summary_path = save_summary(output_dir, summary)

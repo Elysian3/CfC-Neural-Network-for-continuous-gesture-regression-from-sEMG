@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
 
@@ -14,6 +15,7 @@ if str(HARDWARE_DIR) not in sys.path:
     sys.path.insert(0, str(HARDWARE_DIR))
 
 import hardware_preflight as hp
+import export_weights
 
 
 class _TinyGoldenModel(torch.nn.Module):
@@ -47,7 +49,116 @@ def _bundle():
     )
 
 
+def _valid_export_state_dict():
+    state_dict = {}
+    for _c_name, state_key, in_dim, out_dim in export_weights.LAYER_SPEC:
+        state_dict[f"{state_key}.weight"] = torch.zeros((out_dim, in_dim))
+        state_dict[f"{state_key}.bias"] = torch.zeros(out_dim)
+    return state_dict
+
+
 class HardwarePreflightTests(unittest.TestCase):
+    def test_obsolete_entrypoint_files_are_absent(self):
+        obsolete_paths = (
+            HARDWARE_DIR / "quantize_test.py",
+            HARDWARE_DIR / "load-model.cpp",
+            PROJECT_ROOT / "_run_loo_all28.py",
+            PROJECT_ROOT / "main.py",
+        )
+        self.assertEqual([path for path in obsolete_paths if path.exists()], [])
+
+    def test_hardware_operation_does_not_duplicate_firmware_artifacts(self):
+        duplicate_paths = tuple(
+            HARDWARE_DIR / name
+            for name in (
+                "cfc_inference.c",
+                "cfc_inference.h",
+                "cfc_inference.o",
+                "features.c",
+                "features.h",
+                "features.o",
+                "main.c",
+                "normalization.h",
+                "test_cfc_pc.exe",
+                "test_features_pc.exe",
+                "weights.h",
+            )
+        )
+        self.assertEqual([path for path in duplicate_paths if path.exists()], [])
+
+    def test_export_defaults_to_canonical_firmware_directory(self):
+        stats = {
+            "center": np.zeros(12, dtype=np.float32),
+            "scale": np.ones(12, dtype=np.float32),
+        }
+        with (
+            patch.object(export_weights.np, "load", return_value=stats),
+            patch.object(export_weights, "run_export", return_value={}) as run_export,
+        ):
+            export_weights.main(
+                ["--checkpoint", "synthetic.pt", "--norm-stats", "stats.npz"]
+            )
+
+        self.assertEqual(
+            run_export.call_args.kwargs["output_dir"],
+            PROJECT_ROOT / "firmware" / "main",
+        )
+
+    def test_export_requires_training_normalization_stats_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkpoint = root / "model.pt"
+            output_dir = root / "firmware"
+            output_dir.mkdir()
+            weights_path = output_dir / "weights.h"
+            normalization_path = output_dir / "normalization.h"
+            weights_path.write_text("original weights", encoding="utf-8")
+            normalization_path.write_text("original normalization", encoding="utf-8")
+            torch.save(
+                {
+                    "model_state_dict": _valid_export_state_dict(),
+                    "config": {"feature_order": ("rms",), "hidden_units": 256},
+                },
+                checkpoint,
+            )
+
+            with self.assertRaisesRegex(ValueError, "training normalization"):
+                export_weights.run_export(
+                    checkpoint_path=checkpoint,
+                    output_dir=output_dir,
+                )
+
+            self.assertEqual(weights_path.read_text(encoding="utf-8"), "original weights")
+            self.assertEqual(
+                normalization_path.read_text(encoding="utf-8"),
+                "original normalization",
+            )
+
+    def test_export_rejects_invalid_normalization_stats_before_writing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            checkpoint = root / "model.pt"
+            output_dir = root / "firmware"
+            output_dir.mkdir()
+            torch.save(
+                {
+                    "model_state_dict": _valid_export_state_dict(),
+                    "config": {"feature_order": ("rms",), "hidden_units": 256},
+                },
+                checkpoint,
+            )
+
+            with self.assertRaisesRegex(ValueError, "12 values"):
+                export_weights.run_export(
+                    checkpoint_path=checkpoint,
+                    output_dir=output_dir,
+                    norm_center=np.zeros(2, dtype=np.float32),
+                    norm_scale=np.ones(2, dtype=np.float32),
+                )
+
+            self.assertFalse((output_dir / "weights.h").exists())
+            self.assertFalse((output_dir / "normalization.h").exists())
+
     def test_accepts_current_rms_dense_cfc_metadata(self):
         metadata = hp.validate_deployment_config(_valid_config(), output_dim=5)
 

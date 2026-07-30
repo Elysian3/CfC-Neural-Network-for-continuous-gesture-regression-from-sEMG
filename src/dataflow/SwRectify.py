@@ -160,22 +160,3 @@ def sliding_window(
         "target_offset_samples": int(target_offset_samples),
         "target_names": resolved_target_names,
     }
-
-
-def print_window_summary(windows: dict) -> None:
-    """Print the key structural facts about one window batch."""
-    print("\nWindowing summary")
-    print(f"  windows            : {windows['n_windows']}")
-    print(f"  channels           : {windows['n_channels']}")
-    print(f"  unrectified shape  : {windows['unrectified'].shape}")
-    print(f"  rectified shape    : {windows['rectified'].shape}")
-    print(f"  window size        : {windows['window_ms']} ms ({windows['window_size']} samples)")
-    print(f"  stride             : {windows['stride_ms']} ms ({windows['stride']} samples)")
-
-    if windows.get("target_values") is not None:
-        target_values = np.asarray(windows["target_values"], dtype=np.float32)
-        print(f"  target shape       : {target_values.shape}")
-        print(f"  target names       : {windows['target_names']}")
-        print(
-            f"  first alignments   : {np.asarray(windows['target_alignment_indices'])[:5].tolist()}"
-        )

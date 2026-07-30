@@ -29,6 +29,9 @@ from feature_extraction import (
     DEFAULT_MU_LAW_MU,
     STRIDE_MS,
     WIN_MS,
+    _apply_array_normalizer,
+    _fit_array_normalizer,
+    _inverse_array_normalizer,
     apply_feature_normalizer,
     fit_feature_normalizer,
     run_feature_pipeline,
@@ -885,63 +888,22 @@ def fit_target_normalizer(
     mu: float = DEFAULT_MU_LAW_MU,
 ) -> dict:
     """Fit target normalization statistics using the training split only."""
-    targets = np.asarray(target_matrix, dtype=np.float32)
-    if method == "zscore":
-        mean = targets.mean(axis=0, dtype=np.float64).astype(np.float32)
-        std = targets.std(axis=0, dtype=np.float64).astype(np.float32)
-        return {
-            "method": "zscore",
-            "mean": mean,
-            "std": np.maximum(std, 1e-6).astype(np.float32),
-        }
-    if method == "mu_law":
-        center = targets.mean(axis=0, dtype=np.float64).astype(np.float32)
-        centered = targets - center
-        scale = np.max(np.abs(centered), axis=0).astype(np.float32)
-        if mu <= 0.0:
-            raise ValueError("mu must be positive for mu-law normalization")
-        return {
-            "method": "mu_law",
-            "center": center,
-            "scale": np.maximum(scale, 1e-6).astype(np.float32),
-            "mu": float(mu),
-        }
-    raise ValueError(f"unsupported target normalization method: {method}")
+    return _fit_array_normalizer(
+        target_matrix,
+        method=method,
+        mu=mu,
+        value_name="target",
+    )
 
 
 def apply_target_normalizer(target_matrix: np.ndarray, stats: dict) -> np.ndarray:
     """Apply precomputed target normalization."""
-    targets = np.asarray(target_matrix, dtype=np.float32)
-    method = stats.get("method", "zscore")
-    if method == "zscore":
-        mean = np.asarray(stats["mean"], dtype=np.float32)
-        std = np.asarray(stats["std"], dtype=np.float32)
-        return ((targets - mean) / std).astype(np.float32)
-    if method == "mu_law":
-        center = np.asarray(stats["center"], dtype=np.float32)
-        scale = np.asarray(stats["scale"], dtype=np.float32)
-        mu = float(stats["mu"])
-        scaled = (targets - center) / scale
-        compressed = np.sign(scaled) * (np.log1p(mu * np.abs(scaled)) / np.log1p(mu))
-        return compressed.astype(np.float32)
-    raise ValueError(f"unsupported target normalization method: {method}")
+    return _apply_array_normalizer(target_matrix, stats, value_name="target")
 
 
 def inverse_target_normalizer(target_matrix: np.ndarray, stats: dict) -> np.ndarray:
     """Map normalized targets back into the original angle scale."""
-    targets = np.asarray(target_matrix, dtype=np.float32)
-    method = stats.get("method", "zscore")
-    if method == "zscore":
-        mean = np.asarray(stats["mean"], dtype=np.float32)
-        std = np.asarray(stats["std"], dtype=np.float32)
-        return (targets * std + mean).astype(np.float32)
-    if method == "mu_law":
-        center = np.asarray(stats["center"], dtype=np.float32)
-        scale = np.asarray(stats["scale"], dtype=np.float32)
-        mu = float(stats["mu"])
-        expanded = np.sign(targets) * (np.expm1(np.abs(targets) * np.log1p(mu)) / mu)
-        return (expanded * scale + center).astype(np.float32)
-    raise ValueError(f"unsupported target normalization method: {method}")
+    return _inverse_array_normalizer(target_matrix, stats, value_name="target")
 
 
 def normalize_sequence_inputs(
@@ -1372,18 +1334,6 @@ def train_cfc_regressor(config: CfCTrainingConfig) -> dict:
     }
 
 
-def main() -> None:
-    config = build_best_cfc_config()
-    results = train_cfc_regressor(config)
-
-    output_path = REPO_ROOT / "log" / "cfc_best_prediction.png"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    results["prediction_figure"].savefig(output_path, dpi=200, bbox_inches="tight")
-    plt.close(results["prediction_figure"])
-    print(f"\nSaved prediction plot to: {output_path}")
-    return results
-
-
 def subject_sort_key(subject_id: str) -> tuple[int, str]:
     """Sort subject ids numerically instead of lexicographically."""
     digits = "".join(character for character in subject_id if character.isdigit())
@@ -1436,7 +1386,3 @@ def save_summary(output_dir: Path, summary: dict[str, Any]) -> Path:
     with summary_path.open("w", encoding="utf-8") as handle:
         json.dump(make_jsonable(summary), handle, indent=2)
     return summary_path
-
-
-if __name__ == "__main__":
-    main()

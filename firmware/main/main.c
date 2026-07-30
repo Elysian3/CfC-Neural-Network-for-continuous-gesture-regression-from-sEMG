@@ -4,7 +4,7 @@
 // Pipeline:  ADC(12ch@2000Hz) → DSP(notch/hpf/lpf) → RMS(200ms/50ms)
 //            → mu-law → CfC(h=256, 8-seq) → 5-DoA output
 // SRAM:      Raw ringbuf 26.4KB + Filtered ringbuf 19.2KB + RMS seq 0.8KB
-//            + CfC scratch ~5KB = ~52KB (budget 400KB)
+//            + CfC scratch ~5KB = ~52KB (weights remain in flash)
 // ============================================================================
 
 #include <stdint.h>
@@ -50,8 +50,8 @@
 // flt_ringbuf:      RINGBUF_FLT_LEN × N_CHANNELS × 4 = 19,200 (float)
 // biquad_state:     12ch × 3 filters × (5 coeffs + 2 state) × 4 = 1,008
 // rms_seq:          8 × N_FEATURES × 4 = 384
-// sram_weights:     6 layers INT8 weights = 163 KB (flash→SRAM copy at init)
-// TOTAL:            ~210 KB of 400 KB SRAM budget
+// model_weights:    6 layers INT8 weights = 163 KB in flash
+// TOTAL INTERNAL:   ~52 KB of 400 KB SRAM budget
 
 // ── Ring buffers ────────────────────────────────────────────────────────────
 static int16_t raw_ringbuf[RINGBUF_RAW_LEN][N_CHANNELS];
@@ -275,27 +275,19 @@ static void cfc_task(void *arg) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        // Reorder the circular buffer into a linear 8-frame sequence
-        float linear_seq[CFC_SEQ_LEN][N_FEATURES];
-        for (int t = 0; t < CFC_SEQ_LEN; t++) {
-            int src = (rms_seq_idx - CFC_SEQ_LEN + t + CFC_SEQ_LEN)
-                      % CFC_SEQ_LEN;
-            memcpy(linear_seq[t], rms_seq[src], sizeof(rms_seq[src]));
-        }
+        // Latest RMS frame (one before current write head)
+        int idx = (rms_seq_idx - 1 + CFC_SEQ_LEN) % CFC_SEQ_LEN;
 
-        // Run CfC inference
+        // Single-step CfC RNN inference — persistent hidden state
         float output[CFC_OUTPUT_DIM];
         uint32_t t_start = esp_timer_get_time();
-        cfc_inference_int8(linear_seq, output);
+        cfc_single_step(rms_seq[idx], output);
         uint32_t t_elapsed = esp_timer_get_time() - t_start;
 
         // Log latency
         printf("LATENCY: %lu us | DoA: [%.3f, %.3f, %.3f, %.3f, %.3f]\n",
                t_elapsed,
                output[0], output[1], output[2], output[3], output[4]);
-
-        // Pass to output task (queue or direct function call)
-        // For now: print via serial
     }
 }
 
@@ -319,7 +311,8 @@ static void output_task(void *arg) {
 
 void app_main(void) {
     printf("\n=== Antikythera ESP32-S3 DenseCfC RMS-only ===\n");
-    printf("SRAM budget: ~210 KB / 400 KB\n");
+    printf("Weight backend: Flash direct, persistent single-step\n");
+    printf("Internal SRAM budget: ~52 KB / 400 KB\n");
     printf("Pipeline: ADC(12ch@2kHz) → DSP → RMS → mu-law → CfC → 5-DoA\n");
     printf("==============================================\n\n");
 
