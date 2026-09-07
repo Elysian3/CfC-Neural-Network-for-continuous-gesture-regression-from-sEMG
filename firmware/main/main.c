@@ -1,8 +1,8 @@
-// main.c — Antikythera ESP32-S3 DenseCfC RMS-only EMG-to-DoA Pipeline
+// main.c — Antikythera ESP32-S3 DenseCfC RMS-only EMG regression pipeline
 // ============================================================================
 // Hardware:  ESP32-S3 Zero + 74HC4051 12ch mux
 // Pipeline:  ADC(12ch@2000Hz) → DSP(notch/hpf/lpf) → RMS(200ms/50ms)
-//            → mu-law → CfC(h=256, 8-seq) → 5-DoA output
+//            → mu-law → CfC(h=256, 8-seq) → CFC_OUTPUT_DIM output
 // SRAM:      Raw ringbuf 26.4KB + Filtered ringbuf 19.2KB + RMS seq 0.8KB
 //            + CfC scratch ~5KB = ~52KB (weights remain in flash)
 // ============================================================================
@@ -284,10 +284,12 @@ static void cfc_task(void *arg) {
         cfc_single_step(rms_seq[idx], output);
         uint32_t t_elapsed = esp_timer_get_time() - t_start;
 
-        // Log latency
-        printf("LATENCY: %lu us | DoA: [%.3f, %.3f, %.3f, %.3f, %.3f]\n",
-               t_elapsed,
-               output[0], output[1], output[2], output[3], output[4]);
+        // Log every checkpoint-defined output channel.
+        printf("LATENCY: %lu us | Outputs: [", t_elapsed);
+        for (int output_idx = 0; output_idx < CFC_OUTPUT_DIM; output_idx++) {
+            printf("%s%.3f", output_idx == 0 ? "" : ", ", output[output_idx]);
+        }
+        printf("]\n");
     }
 }
 
@@ -313,7 +315,8 @@ void app_main(void) {
     printf("\n=== Antikythera ESP32-S3 DenseCfC RMS-only ===\n");
     printf("Weight backend: Flash direct, persistent single-step\n");
     printf("Internal SRAM budget: ~52 KB / 400 KB\n");
-    printf("Pipeline: ADC(12ch@2kHz) → DSP → RMS → mu-law → CfC → 5-DoA\n");
+    printf("Pipeline: ADC(12ch@2kHz) → DSP → RMS → mu-law → CfC → %d outputs\n",
+           CFC_OUTPUT_DIM);
     printf("==============================================\n\n");
 
     // 1. Init hardware
@@ -321,6 +324,7 @@ void app_main(void) {
     init_adc();
     init_dsp_filters();
     cfc_lut_init();
+    cfc_reset_state();
 
     // 2. Create 50ms DSP timer
     dsp_timer = xTimerCreate(

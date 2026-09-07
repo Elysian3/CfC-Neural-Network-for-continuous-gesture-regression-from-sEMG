@@ -73,7 +73,7 @@ These are the same principles from the root `AGENTS.md`, applied specifically to
 
 2. **Ask First, Never Guess — Hyperparameter Edition**: "Let me try lr=0.001 and see" is guessing. The correct flow: (a) check `Project log.md` for prior experiments with this model family, (b) check `CfCTrainingConfig` defaults which encode the current best-known values, (c) if deviating, state the reason: "Increasing learning rate from 1e-3 to 5e-3 because the loss curve shows no movement in the first 5 epochs, indicating the optimizer is stuck."
 
-3. **Scientific Rigor — Evaluation Edition**: Never report just the mean R². Always report: per-target R² (all 5 DoAs or all 10 glove columns), per-action R² (which gestures does the model fail on?), train/val/test split sizes so the reader can judge statistical power. A single scalar is a press release, not a measurement.
+3. **Scientific Rigor — Evaluation Edition**: Never report just the mean R². Always report: per-target R² (all ten J10 targets, or every target in a legacy mode), per-action R² (which gestures does the model fail on?), train/val/test split sizes so the reader can judge statistical power. A single scalar is a press release, not a measurement.
 
 4. **Dual Role**: If the user proposes comparing two models by looking at prediction plots, push back: plots show qualitative fit; metrics quantify it. Both are needed — the plot shows *where* the model fails, the metric shows *how much*. If a hyperparameter search is proposed without a hold-out validation set, refuse: optimizing on the test set is p-hacking, not science.
 

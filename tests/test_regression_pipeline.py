@@ -5,22 +5,32 @@ from unittest.mock import patch
 
 import numpy as np
 
-
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DATAFLOW_DIR = REPO_ROOT / "src" / "dataflow"
 if str(DATAFLOW_DIR) not in sys.path:
     sys.path.insert(0, str(DATAFLOW_DIR))
 
-import SwRectify as windowing_module
-from SwRectify import sliding_window
-from doa_mapping import DB8_OFFICIAL_W, DB8_TO_DB2_CHANNELS, DOA5_NAMES, DOA5_W, apply_linear_doa_mapping
 import feature_extraction as feature_module
+import SwRectify as windowing_module
+from doa_mapping import (
+    DB8_OFFICIAL_W,
+    DB8_TO_DB2_CHANNELS,
+    DOA5_NAMES,
+    DOA5_W,
+    JOINT_ANGLES10_CHANNELS_1BASED,
+    JOINT_ANGLES10_INDICES,
+    JOINT_ANGLES10_MAPPING_NAME,
+    JOINT_ANGLES10_NAMES,
+    apply_linear_doa_mapping,
+    glove_to_doa,
+)
 from feature_extraction import (
     _compute_rest_thresholds,
     extract_emg_features,
     prepare_regression_data,
     run_feature_pipeline,
 )
+from SwRectify import sliding_window
 
 
 class RegressionPipelineTests(unittest.TestCase):
@@ -257,6 +267,36 @@ class RegressionPipelineTests(unittest.TestCase):
 
         np.testing.assert_allclose(DOA5_W, expected)
 
+    def test_joint_angles10_selects_exact_paper_channels_and_preserves_order(self) -> None:
+        self.assertEqual(JOINT_ANGLES10_CHANNELS_1BASED, (2, 3, 5, 6, 8, 9, 12, 13, 16, 17))
+        self.assertEqual(
+            JOINT_ANGLES10_INDICES,
+            (1, 2, 4, 5, 7, 8, 11, 12, 15, 16),
+        )
+        self.assertEqual(len(JOINT_ANGLES10_NAMES), 10)
+
+        glove = np.arange(66, dtype=np.float32).reshape(3, 22)
+        mapped = apply_linear_doa_mapping(glove, mapping=JOINT_ANGLES10_MAPPING_NAME)
+
+        self.assertEqual(mapped.shape, (3, 10))
+        np.testing.assert_array_equal(mapped, glove[:, list(JOINT_ANGLES10_INDICES)])
+
+    def test_joint_angles10_rejects_ambiguous_non_db2_width(self) -> None:
+        with self.assertRaisesRegex(ValueError, "22 DB2 glove columns"):
+            apply_linear_doa_mapping(
+                np.zeros((2, 10), dtype=np.float32),
+                mapping=JOINT_ANGLES10_MAPPING_NAME,
+            )
+
+    def test_legacy_glove_columns_mapping_and_doa_projection_are_unchanged(self) -> None:
+        from doa_mapping import GLOVE_COLUMN_INDICES, GLOVE_COLUMNS_MAPPING_NAME
+
+        glove = np.arange(44, dtype=np.float32).reshape(2, 22)
+        selected = apply_linear_doa_mapping(glove, mapping=GLOVE_COLUMNS_MAPPING_NAME)
+
+        np.testing.assert_array_equal(selected, glove[:, list(GLOVE_COLUMN_INDICES)])
+        np.testing.assert_allclose(glove_to_doa(selected), glove @ DOA5_W.T)
+
     @patch("feature_extraction.preprocess_emg")
     @patch("feature_extraction.load_data")
     def test_feature_pipeline_can_emit_five_doa_targets(self, mock_load_data, mock_preprocess_emg) -> None:
@@ -277,6 +317,30 @@ class RegressionPipelineTests(unittest.TestCase):
         self.assertEqual(pipeline["target_mapping"], "doa5")
         self.assertEqual(pipeline["target_names"], list(DOA5_NAMES))
         self.assertEqual(pipeline["feature_set"]["target_values"].shape[1], 5)
+
+    @patch("feature_extraction.preprocess_emg")
+    @patch("feature_extraction.load_data")
+    def test_feature_pipeline_emits_joint_angles10_names_and_width(
+        self,
+        mock_load_data,
+        mock_preprocess_emg,
+    ) -> None:
+        emg = np.arange(120, dtype=np.float32).reshape(20, 6)
+        glove = np.arange(440, dtype=np.float32).reshape(20, 22)
+        mock_load_data.return_value = {"emg": emg, "glove": glove}
+        mock_preprocess_emg.side_effect = lambda value, fs: value
+
+        pipeline = run_feature_pipeline(
+            "synthetic.mat",
+            target_mapping=JOINT_ANGLES10_MAPPING_NAME,
+            fs=10,
+            window_ms=400,
+            stride_ms=200,
+        )
+
+        self.assertEqual(pipeline["target_source"], JOINT_ANGLES10_MAPPING_NAME)
+        self.assertEqual(pipeline["target_names"], list(JOINT_ANGLES10_NAMES))
+        self.assertEqual(pipeline["feature_set"]["target_values"].shape[1], 10)
 
     # ── Rest-state threshold calibration tests ───────────────────────────────
 

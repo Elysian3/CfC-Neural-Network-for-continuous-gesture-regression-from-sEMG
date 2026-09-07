@@ -14,7 +14,7 @@ The signal processing pipeline that transforms raw sEMG recordings into normaliz
   → datapreprocess.py    (load + filter: DC → notch 50Hz → BP 20-450Hz)
   → SwRectify.py         (sliding windows 200ms/50ms + target alignment)
   → feature_extraction.py (requested subset of MAV, MAVS, WL, ZC, SSC, RMS)
-  → doa_mapping.py       (optional: 18/22-channel glove → 5 DoAs)
+  → doa_mapping.py       (22-channel glove → paper-selected J10 targets; optional legacy 5-DoA projection)
   → model input
 ```
 
@@ -27,7 +27,7 @@ Each stage is **model-agnostic**: the output is a clean numeric matrix. Sequence
 | `datapreprocess.py` | `.mat` loading (`load_data`), EMG filtering (`preprocess_emg`), and constants (`FS=2000`, `BP_LOW=20`, `BP_HIGH=450`) |
 | `SwRectify.py` | Sliding window decomposition (`sliding_window`), target alignment (`align_targets_to_windows`), constants (`WIN_MS=200`, `STRIDE_MS=50`) |
 | `feature_extraction.py` | EMG feature extraction (`extract_emg_features`), end-to-end pipeline runner (`run_feature_pipeline`), normalization (`fit/apply_feature_normalizer`), regression data prep (`prepare_regression_data`) |
-| `doa_mapping.py` | 18-DoF CyberGlove → 5-DoA linear mapping (`apply_linear_doa_mapping`), official DB8 matrix, DB2 fallback remap |
+| `doa_mapping.py` | DB2 22→10 paper target selection plus legacy 5-DoA/13-column mappings (`apply_linear_doa_mapping`) |
 
 ## First-Principles Logic per Stage
 
@@ -59,9 +59,9 @@ The supported paper/deployment CLI defaults to RMS-only input (12 channels ×
 for controlled research ablations. It computes only requested features and
 calibrates rest thresholds only when selected ZC/SSC features need them.
 
-### 4. doa_mapping.py — Why 18 DoFs → 5 DoAs?
+### 4. doa_mapping.py — Why keep the ten paper targets?
 
-18 independent CyberGlove joint angles are redundant for grasp classification — most functional grasps (power, precision, lateral, hook, etc.) can be parameterized by 5 Degrees of Actuation. The mapping matrix comes from the official DB8 supplementary materials (`Data_Sheet_1.PDF`). For DB2's 22-channel glove, four fingertip channels (7, 10, 14, 18) are excluded because the DB8 figure marks them as n/a — they measure fingertip contact pressure, not joint angle.
+The default target is the ordered set of ten DB2 MCP/PIP channels selected in Figure 4A of Lin & He (2024): one-based channels 2, 3, 5, 6, 8, 9, 12, 13, 16, and 17. The model predicts these raw glove targets directly. The official DB8 18→5 DoA matrix and the historical 13-column mode remain available only for legacy checkpoints and controlled comparisons.
 
 ## Working Principles (Applied to Signal Processing)
 

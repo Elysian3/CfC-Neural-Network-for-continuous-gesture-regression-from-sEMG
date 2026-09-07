@@ -29,110 +29,10 @@
     "ast_hash": "d2f567433908c0b36ac152ac8bcdff6b",
     "semantic_hash": "d2f567433908c0b36ac152ac8bcdff6b"
   },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\load-model.cpp": {
-    "mtime": 1784552551.7731173,
-    "ast_hash": "81051bcc2cf1bedf378224b0a93e2877",
-    "semantic_hash": "81051bcc2cf1bedf378224b0a93e2877"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\quantize_test.py": {
-    "mtime": 1783413744.17027,
-    "ast_hash": "e2fa4871daf1081c7b8ec464d816ed0a",
-    "semantic_hash": "e2fa4871daf1081c7b8ec464d816ed0a"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\idle-notif-cooldown.json": {
-    "mtime": 1784115839.9514663,
-    "ast_hash": "e1cdd8f3410abd8a58a6d640abda8705",
-    "semantic_hash": "e1cdd8f3410abd8a58a6d640abda8705"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\last-tool-error-state.json": {
-    "mtime": 1784098324.843383,
-    "ast_hash": "5595b1817bf59aa4c28e9512183c2e55",
-    "semantic_hash": "5595b1817bf59aa4c28e9512183c2e55"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\pre-tool-advisory-throttle.json": {
-    "mtime": 1784117397.7164328,
-    "ast_hash": "a760d2fe3b1e5ce1ea49d52aa0650390",
-    "semantic_hash": "a760d2fe3b1e5ce1ea49d52aa0650390"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\ralph-state.json": {
-    "mtime": 1784117239.0291133,
-    "ast_hash": "9949744fb46b5828cad6e6e51894069a",
-    "semantic_hash": "9949744fb46b5828cad6e6e51894069a"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\skill-active-state.json": {
-    "mtime": 1784099566.4137847,
-    "ast_hash": "1f989fdaf1550b2b601fcb73d6aee05a",
-    "semantic_hash": "1f989fdaf1550b2b601fcb73d6aee05a"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\.omc\\state\\sessions\\86bbbb26-9af4-4b95-9197-0ad37e4f6759\\ultrawork-state.json": {
-    "mtime": 1784115896.783238,
-    "ast_hash": "50755eada0ba18a38fd59828a3c5c7e4",
-    "semantic_hash": "50755eada0ba18a38fd59828a3c5c7e4"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\cfc_inference.c": {
-    "mtime": 1784099200.3563447,
-    "ast_hash": "f2be776fd2b39e2b1ac364b327270a12",
-    "semantic_hash": "f2be776fd2b39e2b1ac364b327270a12"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\cfc_inference.h": {
-    "mtime": 1784099295.514638,
-    "ast_hash": "95c25a046fcc2d1f239961cb49f5fa09",
-    "semantic_hash": "95c25a046fcc2d1f239961cb49f5fa09"
-  },
   "D:\\Project Antikythera\\src\\hardwareOperation\\export_weights.py": {
     "mtime": 1784096201.3363943,
     "ast_hash": "7525df214573d128ae58d6d2d07620bc",
     "semantic_hash": "7525df214573d128ae58d6d2d07620bc"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\features.c": {
-    "mtime": 1784114193.8910193,
-    "ast_hash": "89f2819584d2cabd9d1eda82ddea735e",
-    "semantic_hash": "89f2819584d2cabd9d1eda82ddea735e"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\features.h": {
-    "mtime": 1784114182.4589086,
-    "ast_hash": "2647f36d0d9433cc3df52b31202ce8a0",
-    "semantic_hash": "2647f36d0d9433cc3df52b31202ce8a0"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\hardware_preflight.py": {
-    "mtime": 1784092889.0756595,
-    "ast_hash": "a34d147799d87c747eb1d505a35a1bb3",
-    "semantic_hash": "a34d147799d87c747eb1d505a35a1bb3"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\main.c": {
-    "mtime": 1784207707.446439,
-    "ast_hash": "103f990044ab26255309c736c01c20db",
-    "semantic_hash": "103f990044ab26255309c736c01c20db"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\normalization.h": {
-    "mtime": 1784096211.8835466,
-    "ast_hash": "f782361f37a1dbd5abbe484390861b0b",
-    "semantic_hash": "f782361f37a1dbd5abbe484390861b0b"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\test_cfc_pc.c": {
-    "mtime": 1784099456.7966921,
-    "ast_hash": "ab8d4bd79c42f54c8e35c19ff0cd20a4",
-    "semantic_hash": "ab8d4bd79c42f54c8e35c19ff0cd20a4"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\test_emg_data.h": {
-    "mtime": 1784114643.604524,
-    "ast_hash": "81b3ce790da2f846c8fe5d85a0b081d7",
-    "semantic_hash": "81b3ce790da2f846c8fe5d85a0b081d7"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\test_features_pc.c": {
-    "mtime": 1784552551.7731173,
-    "ast_hash": "163982e04119bd0d7794047f8cc9181a",
-    "semantic_hash": "163982e04119bd0d7794047f8cc9181a"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\test_golden_data.h": {
-    "mtime": 1784098347.4080517,
-    "ast_hash": "7b7f23ecad5e4b8faf66bbb052cb4657",
-    "semantic_hash": "7b7f23ecad5e4b8faf66bbb052cb4657"
-  },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\weights.h": {
-    "mtime": 1784096211.1186702,
-    "ast_hash": "31b135388fdc48a94a7328ddc8ba00c5",
-    "semantic_hash": "31b135388fdc48a94a7328ddc8ba00c5"
   },
   "D:\\Project Antikythera\\src\\AGENTS.md": {
     "mtime": 1779527911.8219676,
@@ -334,9 +234,9 @@
     "ast_hash": "1b58d0e6d912cbe4fdcbf22545bfdf7e",
     "semantic_hash": "1b58d0e6d912cbe4fdcbf22545bfdf7e"
   },
-  "D:\\Project Antikythera\\src\\hardwareOperation\\AGENTS.md": {
-    "mtime": 1779673271.8042786,
-    "ast_hash": "bab31ff0b8e621ab1842eaafa5a88ed6",
-    "semantic_hash": "bab31ff0b8e621ab1842eaafa5a88ed6"
+  "app.py": {
+    "mtime": 1788007488.4282064,
+    "ast_hash": "a9eb50dea5d9c0ed534170488afaad75",
+    "semantic_hash": ""
   }
 }

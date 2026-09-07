@@ -8,14 +8,13 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HARDWARE_DIR = PROJECT_ROOT / "src" / "hardwareOperation"
 if str(HARDWARE_DIR) not in sys.path:
     sys.path.insert(0, str(HARDWARE_DIR))
 
-import hardware_preflight as hp
 import export_weights
+import hardware_preflight as hp
 
 
 class _TinyGoldenModel(torch.nn.Module):
@@ -46,6 +45,12 @@ def _bundle():
         config=_valid_config(),
         checkpoint_path=Path("synthetic.pt"),
         checkpoint_sha256="abc123",
+        target_normalization_stats={
+            "method": "mu_law",
+            "center": np.zeros(5, dtype=np.float32),
+            "scale": np.ones(5, dtype=np.float32),
+            "mu": 255.0,
+        },
     )
 
 
@@ -54,6 +59,22 @@ def _valid_export_state_dict():
     for _c_name, state_key, in_dim, out_dim in export_weights.LAYER_SPEC:
         state_dict[f"{state_key}.weight"] = torch.zeros((out_dim, in_dim))
         state_dict[f"{state_key}.bias"] = torch.zeros(out_dim)
+    return state_dict
+
+
+def _valid_preflight_state_dict(output_dim=5):
+    state_dict = {}
+    layer_shapes = (
+        ("cfc.rnn_cell.backbone.0", (128, 268)),
+        ("cfc.rnn_cell.ff1", (256, 128)),
+        ("cfc.rnn_cell.ff2", (256, 128)),
+        ("cfc.rnn_cell.time_a", (256, 128)),
+        ("cfc.rnn_cell.time_b", (256, 128)),
+        ("head", (output_dim, 256)),
+    )
+    for layer, weight_shape in layer_shapes:
+        state_dict[f"{layer}.weight"] = torch.zeros(weight_shape)
+        state_dict[f"{layer}.bias"] = torch.zeros(weight_shape[0])
     return state_dict
 
 
@@ -168,6 +189,18 @@ class HardwarePreflightTests(unittest.TestCase):
         self.assertEqual(metadata["input_dim"], 12)  # RMS-only over 12 EMG channels.
         self.assertEqual(metadata["output_dim"], 5)
 
+    def test_accepts_legacy_and_joint_angle_output_widths(self):
+        for output_dim in (5, 10, 13):
+            with self.subTest(output_dim=output_dim):
+                metadata = hp.validate_deployment_config(
+                    _valid_config(),
+                    output_dim=output_dim,
+                )
+                self.assertEqual(metadata["output_dim"], output_dim)
+
+        with self.assertRaisesRegex(hp.HardwarePreflightError, "output_dim"):
+            hp.validate_deployment_config(_valid_config(), output_dim=18)
+
     def test_rejects_autoncp_non_rms_and_wrong_output_dim(self):
         with self.assertRaises(hp.HardwarePreflightError):
             hp.validate_deployment_config({**_valid_config(), "model_family": "autoncp"})
@@ -176,16 +209,53 @@ class HardwarePreflightTests(unittest.TestCase):
             hp.validate_deployment_config({**_valid_config(), "feature_order": ("mav", "rms")})
 
         with self.assertRaises(hp.HardwarePreflightError):
-            hp.validate_deployment_config(_valid_config(), output_dim=10)
+            hp.validate_deployment_config(_valid_config(), output_dim=6)
 
         with self.assertRaises(hp.HardwarePreflightError):
-            hp.validate_deployment_config({**_valid_config(), "output_dim": 10})
+            hp.validate_deployment_config({**_valid_config(), "output_dim": 6})
 
         with self.assertRaises(hp.HardwarePreflightError):
             hp.validate_deployment_config({**_valid_config(), "use_grl": True})
 
         with self.assertRaises(hp.HardwarePreflightError):
             hp.validate_deployment_config({**_valid_config(), "runtime_mode": "adversarial"})
+
+    def test_rejects_incompatible_input_and_sequence_metadata_when_present(self):
+        invalid_metadata = (
+            ("input_dim", 11),
+            ("seq_len", 7),
+            ("emg_channels", tuple(range(11))),
+        )
+        for key, value in invalid_metadata:
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(hp.HardwarePreflightError, key),
+            ):
+                hp.validate_deployment_config({**_valid_config(), key: value})
+
+    def test_rejects_non_deployable_backbone_shape(self):
+        state_dict = _valid_preflight_state_dict()
+        state_dict["cfc.rnn_cell.backbone.0.weight"] = torch.zeros((127, 268))
+
+        with self.assertRaisesRegex(hp.HardwarePreflightError, "backbone.0.weight"):
+            hp.validate_firmware_state_dict(state_dict, output_dim=5)
+
+    def test_rejects_mismatched_target_contract_metadata(self):
+        with self.assertRaisesRegex(hp.HardwarePreflightError, "target_mapping"):
+            hp.validate_target_contract(
+                {
+                    "mapping_name": "doa5",
+                    "mapping_version": "legacy_doa5",
+                    "output_dim": 5,
+                    "target_names": ["a", "b", "c", "d", "e"],
+                },
+                config={**_valid_config(), "target_mapping": "joint_angles10"},
+                output_dim=5,
+            )
+
+    def test_requires_target_inverse_normalization_stats(self):
+        with self.assertRaisesRegex(hp.HardwarePreflightError, "inverse-normalization"):
+            hp._inverse_target_normalization(torch.zeros((1, 5)), None)
 
     def test_relative_error_formula_uses_max_error_over_output_range(self):
         fp32 = torch.tensor([[1.0, 3.0, 5.0, 7.0, 9.0]])
@@ -250,6 +320,52 @@ class HardwarePreflightTests(unittest.TestCase):
             with report_path.open(encoding="utf-8") as handle:
                 on_disk = json.load(handle)
             self.assertEqual(on_disk, first)
+
+    def test_preflight_rejects_quantization_error_before_writing_artifacts(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            with (
+                patch.object(hp, "load_checkpoint_bundle", return_value=_bundle()),
+                patch.object(
+                    hp,
+                    "compute_error_report",
+                    return_value={"relative_error_pct": hp.MAX_RELATIVE_ERROR_PCT},
+                ),
+                self.assertRaisesRegex(
+                    hp.HardwarePreflightError,
+                    "quantization relative error",
+                ),
+            ):
+                hp.run_preflight(
+                    checkpoint=Path("synthetic.pt"),
+                    output_dir=Path(output_dir),
+                )
+
+            self.assertFalse((Path(output_dir) / "hardware_preflight_report.json").exists())
+            self.assertFalse((Path(output_dir) / "golden_tensors.pt").exists())
+
+    def test_preflight_rejects_sram_over_budget_before_writing_artifacts(self):
+        over_budget_memory = {
+            "fits_budget": False,
+            "total_core_sram_kb": 401.0,
+            "budget_kb": 400.0,
+        }
+        with tempfile.TemporaryDirectory() as output_dir:
+            with (
+                patch.object(hp, "load_checkpoint_bundle", return_value=_bundle()),
+                patch.object(
+                    hp,
+                    "estimate_core_sram_kb",
+                    return_value=over_budget_memory,
+                ),
+                self.assertRaisesRegex(hp.HardwarePreflightError, "SRAM estimate"),
+            ):
+                hp.run_preflight(
+                    checkpoint=Path("synthetic.pt"),
+                    output_dir=Path(output_dir),
+                )
+
+            self.assertFalse((Path(output_dir) / "hardware_preflight_report.json").exists())
+            self.assertFalse((Path(output_dir) / "golden_tensors.pt").exists())
 
 
 if __name__ == "__main__":

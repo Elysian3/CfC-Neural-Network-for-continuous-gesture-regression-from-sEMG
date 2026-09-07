@@ -12,7 +12,7 @@ BP_HIGH = 450.0    # Bandpass upper cutoff (Hz)
 BP_ORDER = 4       # Butterworth filter order
 
 
-def load_data(file_path: str) -> dict:
+def load_data(file_path: str, *, variable_names: tuple[str, ...] | None = None) -> dict:
     """
     Load data from a .mat file using scipy.io.loadmat.
 
@@ -20,6 +20,8 @@ def load_data(file_path: str) -> dict:
     ----------
     file_path : str
         Path to the .mat file (e.g., 'src/data/DB2/S1_E1_A1.mat').
+    variable_names : tuple[str, ...] | None
+        Read only these MATLAB variables; None keeps the standard DB2 fields.
 
     Returns
     -------
@@ -36,19 +38,18 @@ def load_data(file_path: str) -> dict:
         - 'restimulus'   : ndarray (N, 1)   – Re-stimulus labels
         - 'rerepetition' : ndarray (N, 1)   – Re-repetition labels
     """
-    # loadmat parses the binary .mat file and returns a Python dict.
-    # struct_as_record=True keeps MATLAB structs as numpy recarrays (safer default).
-    raw = sio.loadmat(file_path, struct_as_record=True)
-
-    # Only pull out the signal variables we care about.
-    # MATLAB also stores metadata under '__header__', '__version__', '__globals__' — we skip those.
-    variable_names = [
+    # Only pull out the signal variables we care about. MATLAB also stores
+    # metadata under '__header__', '__version__', '__globals__' — we skip those.
+    default_variable_names = (
         'emg', 'acc', 'stimulus', 'glove', 'inclin',
         'subject', 'exercise', 'repetition', 'restimulus', 'rerepetition',
-    ]
+    )
+    selected_names = default_variable_names if variable_names is None else tuple(variable_names)
+    # Passing variable_names lets scipy skip unrelated DB2 matrices entirely.
+    raw = sio.loadmat(file_path, struct_as_record=True, variable_names=selected_names)
 
     data = {}
-    for name in variable_names: # eliminate MATLAB internal terms
+    for name in selected_names: # eliminate MATLAB internal terms
         if name in raw:
             data[name] = raw[name]
         else:
@@ -91,6 +92,4 @@ def preprocess_emg(emg_raw: np.ndarray, fs: float = FS) -> np.ndarray:
     emg = scipy.signal.sosfiltfilt(sos_bp, emg, axis=0) # sos_bp stands for second-order coeffcients
 
     return emg
-
-
 

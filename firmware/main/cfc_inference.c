@@ -5,6 +5,14 @@
 #include "normalization.h"
 #include <string.h>  // memset
 
+#if !TARGET_NORMALIZATION_AVAILABLE && !defined(CFC_ALLOW_NORMALIZED_OUTPUT_FIXTURE)
+#error "Target inverse-normalization is required; export deployment headers from a trained checkpoint"
+#endif
+
+#if TARGET_NORMALIZATION_AVAILABLE && TARGET_MU_LAW_DIM != CFC_OUTPUT_DIM
+#error "Target normalization width must match CFC_OUTPUT_DIM"
+#endif
+
 // ── LUT tables ─────────────────────────────────────────────────────────────
 static float lecun_lut  [LUT_SIZE];
 static float tanh_lut   [LUT_SIZE];
@@ -116,6 +124,32 @@ void cfc_reset_state(void) {
     h_initialized = 0;
 }
 
+void cfc_inverse_mulaw(float *values,
+                       int n,
+                       const float *center,
+                       const float *scale,
+                       float mu) {
+    const float log_mu = log1pf(mu);
+    for (int i = 0; i < n; i++) {
+        const float normalized = values[i];
+        const float sign = normalized >= 0.0f ? 1.0f : -1.0f;
+        const float expanded = sign * expm1f(fabsf(normalized) * log_mu) / mu;
+        values[i] = expanded * scale[i] + center[i];
+    }
+}
+
+static void inverse_target_mulaw(float output[CFC_OUTPUT_DIM]) {
+#if TARGET_NORMALIZATION_AVAILABLE
+    cfc_inverse_mulaw(output,
+                      CFC_OUTPUT_DIM,
+                      target_mu_law_center,
+                      target_mu_law_scale,
+                      TARGET_MU_LAW_MU);
+#else
+    (void)output;
+#endif
+}
+
 // ── Sequence inference (batch, for offline validation) ─────────────────────
 
 void cfc_inference_int8(const float feature_seq[CFC_SEQ_LEN][CFC_INPUT_DIM],
@@ -134,6 +168,7 @@ void cfc_inference_int8(const float feature_seq[CFC_SEQ_LEN][CFC_INPUT_DIM],
             cfc_head_weight, cfc_head_bias,
             cfc_head_weight_scale,
             output, CFC_HIDDEN_DIM, CFC_OUTPUT_DIM);
+    inverse_target_mulaw(output);
 }
 
 // ── Single-step RNN inference (one frame, persistent hidden state) ─────────
@@ -151,11 +186,12 @@ void cfc_single_step(const float feature[CFC_INPUT_DIM],
     cfc_step(feature, persistent_h, h_new, 1.0f);
     memcpy(persistent_h, h_new, sizeof(persistent_h));
 
-    // Head layer: hidden → 5-DoA output
+    // Head layer: hidden → checkpoint-defined output vector
     fc_int8(persistent_h,
             cfc_head_weight, cfc_head_bias,
             cfc_head_weight_scale,
             output, CFC_HIDDEN_DIM, CFC_OUTPUT_DIM);
+    inverse_target_mulaw(output);
 }
 
 // ── Mu-law encode ──────────────────────────────────────────────────────────

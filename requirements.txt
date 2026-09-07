@@ -1,0 +1,6 @@
+
+
+
+
+
+scp -P 27473 -r root@connect.westb.seetacloud.com:"~/Project1/log/db2_paper_cfc_finetune/8ch_rmszc_h512_b1024_pretrain"

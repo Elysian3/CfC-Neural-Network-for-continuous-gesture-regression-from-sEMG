@@ -18,17 +18,33 @@ already correct.
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 import numpy as np
 
 try:
-    from doa_mapping import DOA5_NAMES, apply_linear_doa_mapping
     from datapreprocess import FS, load_data, preprocess_emg
+    from doa_mapping import (
+        DOA5_NAMES,
+        GLOVE_COLUMN_INDICES,
+        GLOVE_COLUMN_NAMES,
+        JOINT_ANGLES10_INDICES,
+        JOINT_ANGLES10_MAPPING_NAME,
+        JOINT_ANGLES10_NAMES,
+        apply_linear_doa_mapping,
+    )
     from SwRectify import STRIDE_MS, WIN_MS, sliding_window
 except ImportError:  # pragma: no cover - package-style fallback
-    from .doa_mapping import DOA5_NAMES, apply_linear_doa_mapping
     from .datapreprocess import FS, load_data, preprocess_emg
+    from .doa_mapping import (
+        DOA5_NAMES,
+        GLOVE_COLUMN_INDICES,
+        GLOVE_COLUMN_NAMES,
+        JOINT_ANGLES10_INDICES,
+        JOINT_ANGLES10_MAPPING_NAME,
+        JOINT_ANGLES10_NAMES,
+        apply_linear_doa_mapping,
+    )
     from .SwRectify import STRIDE_MS, WIN_MS, sliding_window
 
 
@@ -120,8 +136,8 @@ def _compute_rest_thresholds(
             ).astype(np.float32)
 
     # ── Fallback: percentile of internally-segmented RMS values ─────────────
-    window_size = int(round(fs * window_ms / 1000.0))
-    stride = int(round(fs * stride_ms / 1000.0))
+    window_size = round(fs * window_ms / 1000.0)
+    stride = round(fs * stride_ms / 1000.0)
     if window_size <= 0 or stride <= 0:
         raise ValueError(
             "fallback window/stride resolved to zero samples; "
@@ -432,8 +448,9 @@ def _select_mapped_targets(
         raise ValueError(f"{target_mapping_source} must be 2-D for target mapping")
     mapped_targets = apply_linear_doa_mapping(source_targets, mapping=target_mapping)
     if target_mapping == "glove_columns":
-        from doa_mapping import GLOVE_COLUMN_INDICES, GLOVE_COLUMN_NAMES
         return mapped_targets, list(GLOVE_COLUMN_INDICES), list(GLOVE_COLUMN_NAMES)
+    if target_mapping == JOINT_ANGLES10_MAPPING_NAME:
+        return mapped_targets, list(JOINT_ANGLES10_INDICES), list(JOINT_ANGLES10_NAMES)
     return mapped_targets, list(range(source_targets.shape[1])), list(DOA5_NAMES)
 
 

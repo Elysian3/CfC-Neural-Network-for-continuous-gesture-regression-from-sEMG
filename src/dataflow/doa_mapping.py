@@ -4,7 +4,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
 DOA5_MAPPING_NAME = "doa5"
 DOA5_MAPPING_VERSION = "doa5_db8_official_direct_with_db2_fallback_v2"
 DOA5_NAMES = (
@@ -13,6 +12,25 @@ DOA5_NAMES = (
     "index_flexion",
     "middle_flexion",
     "ring_little_flexion",
+)
+
+# Ten MCP/PIP targets selected in Figure 4A of Lin & He (2024). Source sensor
+# numbers are one-based in the paper and converted once here for NumPy indexing.
+JOINT_ANGLES10_MAPPING_NAME = "joint_angles10"
+JOINT_ANGLES10_MAPPING_VERSION = "roformer_db2_mcp_pip_10_v1"
+JOINT_ANGLES10_CHANNELS_1BASED = (2, 3, 5, 6, 8, 9, 12, 13, 16, 17)
+JOINT_ANGLES10_INDICES = tuple(channel - 1 for channel in JOINT_ANGLES10_CHANNELS_1BASED)
+JOINT_ANGLES10_NAMES = (
+    "glove_c1_thumb_mcp",
+    "glove_c2_thumb_ip",
+    "glove_c4_index_mcp",
+    "glove_c5_index_pip",
+    "glove_c7_middle_mcp",
+    "glove_c8_middle_pip",
+    "glove_c11_ring_mcp",
+    "glove_c12_ring_pip",
+    "glove_c15_little_mcp",
+    "glove_c16_little_pip",
 )
 
 
@@ -157,6 +175,20 @@ def select_glove_columns(glove_raw: np.ndarray) -> np.ndarray:
     return glove[:, list(GLOVE_COLUMN_INDICES)]
 
 
+def select_joint_angles10(glove_raw: np.ndarray) -> np.ndarray:
+    """Select the paper's ten DB2 MCP/PIP CyberGlove channels in order."""
+    glove = np.asarray(glove_raw, dtype=np.float32)
+    if glove.ndim == 1:
+        glove = glove[np.newaxis, :]
+    if glove.ndim != 2:
+        raise ValueError(f"glove_raw must be 1-D or 2-D, got {glove.ndim}-D")
+    if glove.shape[1] != 22:
+        raise ValueError(
+            f"joint_angles10 requires 22 DB2 glove columns, got {glove.shape[1]}"
+        )
+    return glove[:, list(JOINT_ANGLES10_INDICES)]
+
+
 def glove_to_doa(glove_cols: np.ndarray) -> np.ndarray:
     """Map predicted 13-column glove values back to 5-DoA angles via DOA5_W.
 
@@ -176,11 +208,12 @@ def glove_to_doa(glove_cols: np.ndarray) -> np.ndarray:
 
 def apply_linear_doa_mapping(glove_raw: np.ndarray, mapping: str = DOA5_MAPPING_NAME) -> np.ndarray:
     """
-    Apply an explicit linear mapping from raw glove channels to semantic DoAs.
+    Apply an explicit target mapping to raw glove channels.
 
-    Supports two modes:
+    Supports three modes:
       - 'doa5':         map 22 glove columns → 5 DoA angles via DOA5_W
       - 'glove_columns': keep the 13 non-zero-weight glove columns as-is
+      - 'joint_angles10': keep the ten paper-selected MCP/PIP channels
     """
     glove = np.asarray(glove_raw, dtype=np.float32)
     if glove.ndim == 1:
@@ -190,6 +223,8 @@ def apply_linear_doa_mapping(glove_raw: np.ndarray, mapping: str = DOA5_MAPPING_
 
     if mapping == GLOVE_COLUMNS_MAPPING_NAME:
         return select_glove_columns(glove)
+    if mapping == JOINT_ANGLES10_MAPPING_NAME:
+        return select_joint_angles10(glove)
 
     if mapping != DOA5_MAPPING_NAME:
         raise ValueError(f"unsupported DoA mapping: {mapping}")
@@ -230,4 +265,10 @@ def doa5_mapping_metadata() -> dict:
         "glove_column_names": list(GLOVE_COLUMN_NAMES),
         "glove_columns_mapping_name": GLOVE_COLUMNS_MAPPING_NAME,
         "num_glove_columns": len(GLOVE_COLUMN_INDICES),
+        "joint_angles10_mapping_name": JOINT_ANGLES10_MAPPING_NAME,
+        "joint_angles10_mapping_version": JOINT_ANGLES10_MAPPING_VERSION,
+        "joint_angles10_channels_1based": list(JOINT_ANGLES10_CHANNELS_1BASED),
+        "joint_angles10_indices": list(JOINT_ANGLES10_INDICES),
+        "joint_angles10_names": list(JOINT_ANGLES10_NAMES),
+        "num_joint_angles10": len(JOINT_ANGLES10_INDICES),
     }

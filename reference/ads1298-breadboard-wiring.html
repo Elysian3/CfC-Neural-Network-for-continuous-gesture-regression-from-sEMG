@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADS1298 面包板接线速查</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+  <main>
+    <h1>ADS1298 面包板接线速查</h1>
+    <table>
+      <thead><tr><th>ADS1298 模块</th><th>方向</th><th>ESP32-S3 端角色</th><th>STM32 图中的对应</th></tr></thead>
+      <tbody>
+        <tr><td>3V3</td><td>供电</td><td>3.3 V</td><td>3V3</td></tr>
+        <tr><td>GND</td><td>回路</td><td>GND</td><td>GND</td></tr>
+        <tr><td>DRDY</td><td>ADS → ESP</td><td>中断输入</td><td>PA2</td></tr>
+        <tr><td>CS</td><td>ESP → ADS</td><td>普通输出</td><td>PA3</td></tr>
+        <tr><td>START</td><td>ESP → ADS</td><td>普通输出</td><td>PA4</td></tr>
+        <tr><td>SCLK</td><td>ESP → ADS</td><td>SPI SCLK</td><td>PA5</td></tr>
+        <tr><td>DOUT</td><td>ADS → ESP</td><td>SPI MISO</td><td>PA6</td></tr>
+        <tr><td>DIN</td><td>ESP → ADS</td><td>SPI MOSI</td><td>PA7</td></tr>
+        <tr><td>RESET</td><td>ESP → ADS</td><td>普通输出，正常时高</td><td>PB0</td></tr>
+        <tr><td>PWDN</td><td>ESP → ADS</td><td>普通输出，正常时高</td><td>PB1</td></tr>
+      </tbody>
+    </table>
+    <p><strong>已由本模块原理图确认：</strong>CLK 接板载 SiT8008 2.048 MHz 时钟；R7 将 CLKSEL 以 10 kΩ 下拉到 GND；R4 将 DAISY_IN 以 10 kΩ 下拉到 GND。因此这三根不接 ESP32。</p>
+    <p><strong>不接或后续确认：</strong>CLK、CLKSEL、GPIO1–GPIO3、GPIO4；单芯片时 DAISY_IN 需为逻辑 0，先确认模块是否已下拉；RLDOUT、AGND 和 INxP/INxN 属于模拟/电极侧，不参与数字联调。</p>
+    <p>来源：<a href="https://www.ti.com/lit/ds/symlink/ads1298.pdf">TI ADS1298 datasheet</a> 与随模块提供的 STM32 接线图。</p>
+  </main>
+</body>
+</html>
